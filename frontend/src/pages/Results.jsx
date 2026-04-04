@@ -68,19 +68,26 @@ function LighthouseMetrics({ lighthouse }) {
 
 // ─── Shared nav bar ───────────────────────────────────────────────────────────
 
-function NavBar({ onBack, right }) {
+function NavBar({ onBack }) {
   return (
-    <nav className="sticky top-0 z-10 bg-zinc-950/80 backdrop-blur-md border-b border-zinc-800/50 flex items-center justify-between px-4 sm:px-6 py-3">
+    <nav className="sticky top-0 z-10 bg-zinc-950/80 backdrop-blur-md border-b border-white/5 flex items-center justify-between px-6 sm:px-10 py-4">
       <button
         onClick={onBack}
-        className="flex items-center gap-1.5 text-zinc-500 hover:text-zinc-300 transition-colors text-sm"
+        className="flex items-center gap-2 text-zinc-500 hover:text-zinc-200 transition-colors text-sm font-medium group"
       >
-        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <svg className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
         </svg>
         Back
       </button>
-      {right}
+      <div className="flex items-center gap-2.5">
+        <div className="w-6 h-6 rounded-md bg-violet-600 flex items-center justify-center">
+          <svg className="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803a7.5 7.5 0 0010.607 0z" />
+          </svg>
+        </div>
+        <span className="text-sm font-semibold text-zinc-400">Site Audit AI</span>
+      </div>
     </nav>
   )
 }
@@ -98,7 +105,7 @@ export default function Results() {
   // Error fetching the job
   if (error) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-zinc-950 dot-grid flex items-center justify-center p-4">
         <div className="text-center max-w-sm">
           <div className="w-12 h-12 mx-auto mb-5 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center">
             <svg className="w-6 h-6 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -122,9 +129,9 @@ export default function Results() {
   if (isProcessing) {
     const urlDisplay = data?.url ? displayUrl(data.url) : 'your site'
     return (
-      <div className="min-h-screen bg-zinc-950 flex flex-col">
+      <div className="min-h-screen bg-zinc-950 dot-grid flex flex-col">
         <div className="fixed inset-0 pointer-events-none">
-          <div className="absolute top-1/3 left-1/2 -translate-x-1/2 w-96 h-96 bg-violet-600/8 rounded-full blur-3xl" />
+          <div className="absolute top-1/3 left-1/2 -translate-x-1/2 w-[600px] h-[400px] bg-violet-600/10 rounded-full blur-[80px]" />
         </div>
 
         <NavBar onBack={() => navigate('/')} />
@@ -160,7 +167,7 @@ export default function Results() {
   // Failed state
   if (isFailed) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex flex-col">
+      <div className="min-h-screen bg-zinc-950 dot-grid flex flex-col">
         <NavBar onBack={() => navigate('/')} />
         <div className="flex-1 flex items-center justify-center p-6">
           <div className="text-center max-w-sm">
@@ -209,15 +216,15 @@ export default function Results() {
   const auditUrl     = data.url ?? ''
 
   return (
-    <div className="min-h-screen bg-zinc-950 pb-20">
-      {/* Background glow */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-64 bg-violet-600/5 blur-3xl" />
+    <div className="min-h-screen bg-zinc-950 dot-grid pb-20">
+      <div className="fixed inset-0 pointer-events-none overflow-hidden" aria-hidden>
+        <div className="absolute -top-20 left-1/2 -translate-x-1/2 w-[700px] h-64 bg-violet-600/10 blur-[80px]" />
+        <div className="absolute top-1/2 -right-40 w-96 h-96 bg-indigo-600/8 rounded-full blur-[80px]" />
       </div>
 
       <NavBar onBack={() => navigate('/')} />
 
-      <div className="max-w-3xl mx-auto px-4 sm:px-6 pt-10 space-y-10">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-10 space-y-10">
 
         {/* ── Hero ─────────────────────────────────────────────────────── */}
         <section className="animate-fade-in">
