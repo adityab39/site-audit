@@ -136,6 +136,9 @@ async def run_lighthouse(url: str) -> dict[str, Any]:
 def _build_cmd(url: str) -> list[str]:
     """Build the Lighthouse CLI command.
 
+    Runs in desktop preset with no simulated throttling so scores match
+    what users see in Chrome DevTools (Desktop, No throttling).
+
     --chrome-path is intentionally omitted unless LIGHTHOUSE_CHROME_PATH is
     explicitly set to a non-empty value. Lighthouse auto-detects the system
     Chrome on macOS and most Linux installs without any flag.
@@ -148,6 +151,8 @@ def _build_cmd(url: str) -> list[str]:
         "--chrome-flags=--headless --no-sandbox --disable-gpu",
         f"--only-categories={','.join(_CATEGORIES)}",
         "--quiet",
+        "--preset=desktop",
+        "--throttling-method=provided",
     ]
     chrome_path = (settings.lighthouse_chrome_path or "").strip()
     if chrome_path:
