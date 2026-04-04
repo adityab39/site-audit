@@ -103,6 +103,15 @@ Score each category from 0 to 10 (integers preferred).
    • FCP: < 1.8 s Good, 1.8–3 s Needs Work, > 3 s Poor
    Also evaluate: page size, request count, render-blocking resources, unused JS/CSS.
 
+   IMPORTANT — Lighthouse has FOUR separate scores:
+     • Lighthouse Performance Score (0-100) — speed; used for this "performance" category
+     • Lighthouse Accessibility Score (0-100) — used for the "accessibility" category
+     • Lighthouse SEO Score (0-100) — one signal in "seo_health"
+     • Lighthouse Best Practices Score (0-100) — one signal in "trust_credibility"
+   NEVER write "Lighthouse score" without specifying which category (Performance,
+   Accessibility, SEO, or Best Practices). Always use the full label, e.g.
+   "Lighthouse Performance Score: 55/100" or "Lighthouse SEO Score: 92/100".
+
 4. design_ux — Visual design and user experience
    • CTA visibility and placement above the fold
    • Typography: font families and readability
@@ -366,15 +375,42 @@ def _build_audit_context(
     ]
 
     if lighthouse_data and not lighthouse_data.get("error"):
+        scores = lighthouse_data.get("scores", {})
+        cwv    = lighthouse_data.get("core_web_vitals", {})
+        stats  = lighthouse_data.get("page_stats", {})
+        diag   = lighthouse_data.get("diagnostics", {})
+
+        def fmt_score(v: float | None) -> str:
+            return f"{round(v)}/100" if v is not None else "unavailable"
+
+        # Spell out each score explicitly so Claude cannot confuse them
+        labelled_scores = (
+            f"Lighthouse Performance Score: {fmt_score(scores.get('performance_score'))}  "
+            f"← use this for the 'performance' category\n"
+            f"Lighthouse Accessibility Score: {fmt_score(scores.get('accessibility_score'))}  "
+            f"← use this for the 'accessibility' category\n"
+            f"Lighthouse SEO Score: {fmt_score(scores.get('seo_score'))}  "
+            f"← one signal in 'seo_health' (not the overall SEO score)\n"
+            f"Lighthouse Best Practices Score: {fmt_score(scores.get('best_practices_score'))}  "
+            f"← one signal in 'trust_credibility'"
+        )
+
         lh_context: dict[str, Any] = {
-            "scores": lighthouse_data.get("scores", {}),
-            "core_web_vitals": lighthouse_data.get("core_web_vitals", {}),
-            "page_stats": lighthouse_data.get("page_stats", {}),
-            "diagnostics": lighthouse_data.get("diagnostics", {}),
+            "core_web_vitals": cwv,
+            "page_stats": stats,
+            "diagnostics": diag,
         }
-        sections += ["", "## Lighthouse Performance Data", json.dumps(lh_context, indent=2, default=str)]
+
+        sections += [
+            "",
+            "## Lighthouse Data",
+            "### Scores (each is a distinct Lighthouse category — always name the category when citing a score)",
+            labelled_scores,
+            "### Core Web Vitals, Page Stats, Diagnostics",
+            json.dumps(lh_context, indent=2, default=str),
+        ]
     else:
-        sections += ["", "## Lighthouse Performance Data", "Not available — evaluate performance from crawl data only."]
+        sections += ["", "## Lighthouse Data", "Not available — evaluate performance from crawl data only."]
 
     sections.append("\n\nAnalyse the website using the data above and return your JSON audit report.")
     return "\n".join(sections)
