@@ -43,25 +43,57 @@ function ScoreLabel({ score }) {
 // ─── Lighthouse metrics row ───────────────────────────────────────────────────
 
 function LighthouseMetrics({ lighthouse }) {
-  if (!lighthouse || lighthouse.error) return null
+  // Lighthouse data is stored as { scores, core_web_vitals, page_stats, diagnostics }
+  // It is only present in results when Lighthouse succeeded (no error key).
+  if (!lighthouse || Object.keys(lighthouse).length === 0) return null
+
+  const cwv       = lighthouse.core_web_vitals  ?? {}
+  const pageStats = lighthouse.page_stats        ?? {}
+  const scores    = lighthouse.scores            ?? {}
+
+  // Helper: format seconds value
+  const secs = (v) => v != null ? `${Number(v).toFixed(1)}s` : '—'
+  // Helper: format milliseconds
+  const ms   = (v) => v != null ? `${Math.round(v)}ms`       : '—'
+  // Helper: format bytes → MB / KB
+  const size = (bytes) => {
+    if (bytes == null) return '—'
+    if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`
+    return `${Math.round(bytes / 1000)} KB`
+  }
 
   const metrics = [
-    { label: 'LCP',        value: lighthouse.largest_contentful_paint_ms != null ? `${(lighthouse.largest_contentful_paint_ms / 1000).toFixed(1)}s` : '—' },
-    { label: 'TBT',        value: lighthouse.total_blocking_time_ms       != null ? `${lighthouse.total_blocking_time_ms}ms`                         : '—' },
-    { label: 'CLS',        value: lighthouse.cumulative_layout_shift       != null ? lighthouse.cumulative_layout_shift.toFixed(3)                    : '—' },
-    { label: 'FCP',        value: lighthouse.first_contentful_paint_ms    != null ? `${(lighthouse.first_contentful_paint_ms / 1000).toFixed(1)}s`   : '—' },
-    { label: 'Speed Idx',  value: lighthouse.speed_index_ms               != null ? `${(lighthouse.speed_index_ms / 1000).toFixed(1)}s`              : '—' },
-    { label: 'Page Size',  value: lighthouse.total_byte_weight_kb         != null ? `${(lighthouse.total_byte_weight_kb / 1024).toFixed(1)} MB`       : '—' },
+    { label: 'LCP',        value: secs(cwv.largest_contentful_paint) },
+    { label: 'TBT',        value: ms(cwv.total_blocking_time) },
+    { label: 'CLS',        value: cwv.cumulative_layout_shift != null ? Number(cwv.cumulative_layout_shift).toFixed(3) : '—' },
+    { label: 'FCP',        value: secs(cwv.first_contentful_paint) },
+    { label: 'Speed Idx',  value: secs(cwv.speed_index) },
+    { label: 'Page Size',  value: size(pageStats.total_page_size_bytes) },
   ]
 
+  // Colour-code the Lighthouse performance score as a bonus pill
+  const perfScore = scores.performance_score
+  const perfColor = perfScore == null ? 'text-zinc-500'
+    : perfScore >= 75 ? 'text-green-400'
+    : perfScore >= 50 ? 'text-yellow-400'
+    : 'text-red-400'
+
   return (
-    <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
-      {metrics.map((m) => (
-        <div key={m.label} className="glass-card border border-zinc-800 p-3 text-center rounded-xl">
-          <p className="text-[11px] text-zinc-500 mb-1 uppercase tracking-wider">{m.label}</p>
-          <p className="text-sm font-bold text-zinc-200">{m.value}</p>
-        </div>
-      ))}
+    <div className="space-y-3">
+      {perfScore != null && (
+        <p className="text-xs text-zinc-600">
+          Lighthouse performance score:{' '}
+          <span className={`font-bold ${perfColor}`}>{Math.round(perfScore)}/100</span>
+        </p>
+      )}
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+        {metrics.map((m) => (
+          <div key={m.label} className="glass-card border border-zinc-800 p-3 text-center rounded-xl">
+            <p className="text-[11px] text-zinc-500 mb-1 uppercase tracking-wider">{m.label}</p>
+            <p className="text-sm font-bold text-zinc-200">{m.value}</p>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -197,6 +229,12 @@ export default function Results() {
 
   // ─── Results ───────────────────────────────────────────────────────────────
 
+  // Debug: log full response structure so field names are visible in DevTools
+  console.log('[SiteAudit] full response:', data)
+  console.log('[SiteAudit] lighthouse data:', data.results?.lighthouse)
+  console.log('[SiteAudit] lighthouse.core_web_vitals:', data.results?.lighthouse?.core_web_vitals)
+  console.log('[SiteAudit] lighthouse.page_stats:', data.results?.lighthouse?.page_stats)
+
   const analysis     = data.results?.analysis ?? {}
   const lighthouse   = data.results?.lighthouse ?? {}
   const priorityFixes = analysis.priority_fixes ?? []
@@ -278,7 +316,7 @@ export default function Results() {
         )}
 
         {/* ── Core Web Vitals ───────────────────────────────────────────── */}
-        {lighthouse && !lighthouse.error && (
+        {lighthouse && lighthouse.core_web_vitals && (
           <section className="animate-slide-up">
             <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">Core Web Vitals</h2>
             <LighthouseMetrics lighthouse={lighthouse} />
