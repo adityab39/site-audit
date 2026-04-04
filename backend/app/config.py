@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Lighthouse
     lighthouse_binary: str = "lighthouse"
     lighthouse_timeout_ms: int = 60_000
+    # Path to the Chrome/Chromium binary Lighthouse should use.
+    # Defaults to the system chromium installed in the Docker image.
+    # Set to empty string to let Lighthouse auto-detect.
+    lighthouse_chrome_path: str = "/usr/bin/chromium"
 
     # Worker / job settings
     job_expiry_seconds: int = 86_400  # 24 hours

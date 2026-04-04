@@ -1,12 +1,22 @@
 FROM python:3.12-slim
 
-# Install system dependencies required by Playwright and Lighthouse
+# ── System dependencies ────────────────────────────────────────────────────────
+# Two separate Chrome/Chromium binaries are used:
+#   • System `chromium`  → consumed by Lighthouse CLI (pointed via --chrome-path)
+#   • Playwright Chromium → downloaded below; consumed by the crawler service
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Runtime utilities
     curl \
+    wget \
+    ca-certificates \
     gnupg \
+    xdg-utils \
+    # Node / npm (required for Lighthouse)
     nodejs \
     npm \
-    ca-certificates \
+    # System Chromium for Lighthouse
+    chromium \
+    # Shared libs needed by both Chromium instances
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -26,22 +36,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     libxss1 \
     libxtst6 \
-    wget \
-    xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Lighthouse globally
+# ── Lighthouse ─────────────────────────────────────────────────────────────────
 RUN npm install -g lighthouse
 
+# ── Python dependencies ────────────────────────────────────────────────────────
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (Chromium only)
+# ── Playwright – Chromium browser for the crawler service ──────────────────────
 RUN playwright install chromium --with-deps
 
+# ── Application source ─────────────────────────────────────────────────────────
 COPY . .
+
+# Tell Lighthouse where the system Chromium lives (can be overridden via env)
+ENV LIGHTHOUSE_CHROME_PATH=/usr/bin/chromium
 
 EXPOSE 8000
 

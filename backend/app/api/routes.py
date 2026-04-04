@@ -1,6 +1,7 @@
 """API route definitions for Site Audit AI."""
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -125,8 +126,6 @@ async def get_audit(
     cache_key = f"audit:{job_id}"
     cached = await redis.get(cache_key)
     if cached:
-        import json
-
         data = json.loads(cached)
         return AuditStatusResponse(**data)
 
@@ -160,8 +159,6 @@ async def get_audit(
 
     # Cache completed / failed jobs so the DB isn't hammered
     if audit.status in (AuditStatus.COMPLETED, AuditStatus.FAILED):
-        import json
-
         await redis.setex(
             cache_key,
             settings.cache_ttl_seconds,
