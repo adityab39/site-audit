@@ -22,17 +22,24 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Handle startup and shutdown events."""
-    logger.info("Starting %s v%s", settings.app_name, settings.app_version)
+    logger.info("━" * 60)
+    logger.info("  %s  v%s  starting up", settings.app_name, settings.app_version)
+    logger.info("━" * 60)
 
-    # Create database tables (use Alembic migrations in production)
+    # Create all database tables if they do not exist.
+    # For existing databases with schema changes, use Alembic migrations.
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables verified / created.")
+    logger.info("✓ Database tables verified / created")
 
-    # Warm up the Redis connection
+    # Warm up Redis connection and confirm reachability
     redis = await get_redis()
     await redis.ping()
-    logger.info("Redis connection established.")
+    logger.info("✓ Redis connection established")
+
+    logger.info("✓ CORS origins: %s", settings.allowed_origins)
+    logger.info("✓ Claude model: %s", settings.claude_model)
+    logger.info("━" * 60)
 
     yield
 

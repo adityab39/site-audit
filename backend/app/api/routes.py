@@ -1,27 +1,46 @@
-"""API route definitions for Site Audit AI."""
+"""API route definitions for Site Audit AI.
 
-import asyncio
+Endpoints
+---------
+GET  /health                  – liveness / dependency health check
+POST /api/audit               – submit a URL for auditing (returns job_id immediately)
+GET  /api/audit/history       – last 20 completed audits (most-recent first)
+GET  /api/audit/{job_id}      – poll job status and retrieve results
+DELETE /api/audit/{job_id}    – remove an audit record
+
+IMPORTANT: /api/audit/history MUST be registered before /api/audit/{job_id}
+so FastAPI does not attempt UUID coercion on the literal string "history".
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
 import json
 import logging
 import uuid
 from datetime import datetime, timezone
-
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any
 
 import redis.asyncio as aioredis
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from sqlalchemy import desc, func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.config import get_settings
-from app.database import get_db, get_redis
+from app.database import AsyncSessionLocal, get_db, get_redis
 from app.models.audit import AuditResult, AuditStatus, CategoryScore
 from app.schemas.audit import (
     AuditCreateResponse,
+    AuditHistoryItem,
+    AuditHistoryResponse,
     AuditRequest,
-    AuditStatusResponse,
+    AuditResultResponse,
+    CategoryScoreSchema,
     HealthResponse,
 )
-from app.services.analyzer import run_analysis
-from app.services.crawler import run_crawl
+from app.services.analyzer import analyze_website, analyze_website_roast
+from app.services.crawler import crawl_website
 from app.services.lighthouse import run_lighthouse
 
 logger = logging.getLogger(__name__)
@@ -29,18 +48,91 @@ settings = get_settings()
 
 router = APIRouter()
 
+# Redis TTL for completed audit results (24 hours)
+_RESULT_TTL_S: int = 86_400
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _url_hash(url: str, mode: str) -> str:
+    """Stable, fixed-length key component for a URL + mode pair."""
+    return hashlib.sha256(f"{url}:{mode}".encode()).hexdigest()
+
+
+def _result_cache_key(job_id: uuid.UUID) -> str:
+    return f"audit:result:{job_id}"
+
+
+def _url_cache_key(url: str, mode: str) -> str:
+    return f"audit:url:{_url_hash(url, mode)}"
+
+
+def _extract_screenshot(crawl_data: dict[str, Any]) -> bytes | None:
+    """Decode the base-64 screenshot from crawl data into raw bytes."""
+    b64: str | None = crawl_data.get("screenshot")
+    if not b64:
+        return None
+    try:
+        return base64.b64decode(b64)
+    except Exception as exc:
+        logger.warning("Failed to decode screenshot: %s", exc)
+        return None
+
+
+def _score_label(score: float) -> str:
+    if score >= 8:
+        return "Good"
+    if score >= 5:
+        return "Needs Improvement"
+    return "Poor"
+
+
+def _audit_to_response(audit: AuditResult) -> AuditResultResponse:
+    """Convert an ORM AuditResult row into the API response schema."""
+    return AuditResultResponse(
+        job_id=audit.id,
+        url=audit.url,
+        mode=audit.mode,
+        status=audit.status,
+        error_message=audit.error_message,
+        ai_summary=audit.ai_summary,
+        overall_score=audit.overall_score,
+        results=audit.results,
+        category_scores=[
+            CategoryScoreSchema(
+                id=cs.id,
+                category=cs.category,
+                score=cs.score,
+                label=cs.label,
+                details=cs.details,
+            )
+            for cs in audit.category_scores
+        ],
+        created_at=audit.created_at,
+        started_at=audit.started_at,
+        completed_at=audit.completed_at,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 
 
-@router.get("/health", response_model=HealthResponse, tags=["Health"])
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["Health"],
+    summary="Application health check",
+)
 async def health_check(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ) -> HealthResponse:
-    """Return the liveness status of the application and its dependencies."""
+    """Return liveness status for the API, database, and Redis."""
     db_status = "ok"
     redis_status = "ok"
 
@@ -65,7 +157,7 @@ async def health_check(
 
 
 # ---------------------------------------------------------------------------
-# Audit endpoints
+# POST /api/audit
 # ---------------------------------------------------------------------------
 
 
@@ -74,97 +166,149 @@ async def health_check(
     response_model=AuditCreateResponse,
     status_code=status.HTTP_202_ACCEPTED,
     tags=["Audit"],
+    summary="Submit a URL for auditing",
+    responses={
+        202: {"description": "Job accepted; poll GET /api/audit/{job_id} for results."},
+        400: {"description": "Invalid URL format."},
+    },
 )
 async def create_audit(
     payload: AuditRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> AuditCreateResponse:
-    """
-    Submit a URL for auditing.
+    """Accept a URL and mode, kick off a background audit, return a job ID.
 
-    Returns a ``job_id`` that can be polled via ``GET /api/audit/{job_id}``.
-    The audit runs asynchronously in the background.
+    **Cache behaviour** – if the same URL and mode were successfully audited
+    within the last 24 hours the existing ``job_id`` is returned immediately
+    (``cached: true``) without launching a new pipeline run.
     """
-    audit = AuditResult(
-        url=str(payload.url),
-        status=AuditStatus.PENDING,
-    )
+    url = str(payload.url)
+    mode = payload.mode
+
+    # ── 1. Check URL-level cache ──────────────────────────────────────────────
+    url_key = _url_cache_key(url, mode)
+    cached_job_id: str | None = await redis.get(url_key)
+    if cached_job_id:
+        logger.info("Cache hit for %s (mode=%s) → job %s", url, mode, cached_job_id)
+        return AuditCreateResponse(
+            job_id=uuid.UUID(cached_job_id),
+            status=AuditStatus.COMPLETED,
+            cached=True,
+        )
+
+    # ── 2. Persist a new job row ──────────────────────────────────────────────
+    audit = AuditResult(url=url, mode=mode, status=AuditStatus.PENDING)
     db.add(audit)
     await db.flush()
-    job_id = audit.id
+    job_id: uuid.UUID = audit.id
     await db.commit()
 
-    background_tasks.add_task(
-        _run_audit_pipeline,
-        job_id=job_id,
-        url=str(payload.url),
-        max_pages=payload.max_pages,
-        include_lighthouse=payload.include_lighthouse,
+    # ── 3. Enqueue background pipeline ───────────────────────────────────────
+    background_tasks.add_task(_run_audit, job_id=job_id, url=url, mode=mode)
+    logger.info("Audit job %s queued for %s (mode=%s)", job_id, url, mode)
+
+    return AuditCreateResponse(job_id=job_id, status=AuditStatus.PENDING)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/audit/history   ← MUST be before /{job_id}
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/api/audit/history",
+    response_model=AuditHistoryResponse,
+    tags=["Audit"],
+    summary="List recent audits",
+)
+async def get_audit_history(
+    db: AsyncSession = Depends(get_db),
+    limit: int = 20,
+) -> AuditHistoryResponse:
+    """Return the *limit* most-recent audit jobs (default 20, max 100).
+
+    Each entry includes the URL, mode, status, overall score, and timestamps
+    — enough to render a history list without fetching full results.
+    """
+    limit = min(max(limit, 1), 100)
+
+    total_count: int = await db.scalar(
+        select(func.count()).select_from(AuditResult)
+    ) or 0
+
+    result = await db.execute(
+        select(AuditResult)
+        .order_by(desc(AuditResult.created_at))
+        .limit(limit)
+    )
+    audits = result.scalars().all()
+
+    return AuditHistoryResponse(
+        audits=[
+            AuditHistoryItem(
+                job_id=a.id,
+                url=a.url,
+                mode=a.mode,
+                status=a.status,
+                overall_score=a.overall_score,
+                ai_summary=a.ai_summary,
+                created_at=a.created_at,
+                completed_at=a.completed_at,
+            )
+            for a in audits
+        ],
+        total=total_count,
     )
 
-    return AuditCreateResponse(
-        job_id=job_id,
-        status=AuditStatus.PENDING,
-        message="Audit job accepted and queued.",
-    )
+
+# ---------------------------------------------------------------------------
+# GET /api/audit/{job_id}
+# ---------------------------------------------------------------------------
 
 
 @router.get(
     "/api/audit/{job_id}",
-    response_model=AuditStatusResponse,
+    response_model=AuditResultResponse,
     tags=["Audit"],
+    summary="Get audit status and results",
+    responses={
+        200: {"description": "Audit record found."},
+        404: {"description": "Audit job not found."},
+    },
 )
 async def get_audit(
     job_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
-) -> AuditStatusResponse:
-    """
-    Retrieve the status and (when complete) the results of an audit job.
-    """
-    cache_key = f"audit:{job_id}"
-    cached = await redis.get(cache_key)
-    if cached:
-        data = json.loads(cached)
-        return AuditStatusResponse(**data)
+) -> AuditResultResponse:
+    """Return the current status and (when complete) full results for a job.
 
+    Completed and failed jobs are Redis-cached for 24 hours to minimise
+    database load during repeated polling.
+    """
+    # ── 1. Redis cache ────────────────────────────────────────────────────────
+    result_key = _result_cache_key(job_id)
+    cached = await redis.get(result_key)
+    if cached:
+        return AuditResultResponse(**json.loads(cached))
+
+    # ── 2. Database lookup ────────────────────────────────────────────────────
     audit: AuditResult | None = await db.get(AuditResult, job_id)
     if audit is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Audit job {job_id} not found.",
+            detail=f"Audit job '{job_id}' not found.",
         )
 
-    analysis: dict = audit.analysis_result or {}
-    response = AuditStatusResponse(
-        job_id=audit.id,
-        url=audit.url,
-        status=audit.status,
-        error_message=audit.error_message,
-        ai_summary=audit.ai_summary,
-        overall_score=analysis.get("overall_score"),
-        analysis_result=audit.analysis_result,
-        category_scores=[
-            {
-                "id": score.id,
-                "category": score.category,
-                "score": score.score,
-                "label": score.label,
-                "details": score.details,
-            }
-            for score in audit.category_scores
-        ],
-        created_at=audit.created_at,
-        started_at=audit.started_at,
-        completed_at=audit.completed_at,
-    )
+    response = _audit_to_response(audit)
 
-    # Cache completed / failed jobs so the DB isn't hammered
+    # ── 3. Cache terminal states ──────────────────────────────────────────────
     if audit.status in (AuditStatus.COMPLETED, AuditStatus.FAILED):
         await redis.setex(
-            cache_key,
-            settings.cache_ttl_seconds,
+            result_key,
+            _RESULT_TTL_S,
             json.dumps(response.model_dump(), default=str),
         )
 
@@ -172,86 +316,160 @@ async def get_audit(
 
 
 # ---------------------------------------------------------------------------
+# DELETE /api/audit/{job_id}
+# ---------------------------------------------------------------------------
+
+
+@router.delete(
+    "/api/audit/{job_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["Audit"],
+    summary="Delete an audit record",
+    responses={
+        204: {"description": "Audit deleted successfully."},
+        404: {"description": "Audit job not found."},
+    },
+)
+async def delete_audit(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> None:
+    """Permanently delete an audit record and its cached entries."""
+    audit: AuditResult | None = await db.get(AuditResult, job_id)
+    if audit is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Audit job '{job_id}' not found.",
+        )
+
+    # Remove URL→job_id cache so the URL can be re-audited immediately
+    url_key = _url_cache_key(audit.url, audit.mode)
+    result_key = _result_cache_key(job_id)
+    await redis.delete(url_key, result_key)
+
+    await db.delete(audit)
+    await db.commit()
+    logger.info("Audit %s deleted.", job_id)
+
+
+# ---------------------------------------------------------------------------
 # Background audit pipeline
 # ---------------------------------------------------------------------------
 
 
-async def _run_audit_pipeline(
-    job_id: uuid.UUID,
-    url: str,
-    max_pages: int,
-    include_lighthouse: bool,
-) -> None:
-    """
-    Full audit pipeline executed as a background task:
-    1. Crawl the site with Playwright
-    2. (Optionally) run Lighthouse
-    3. Send data to Claude for analysis
-    4. Persist results to the database
-    """
-    from app.database import AsyncSessionLocal
+async def _run_audit(job_id: uuid.UUID, url: str, mode: str) -> None:
+    """Full three-stage audit pipeline executed as a FastAPI background task.
 
+    Stages
+    ------
+    1. Crawl  — Playwright extracts page metadata, content, CTAs, screenshot
+    2. Lighthouse — CLI subprocess collects performance + Core Web Vitals
+    3. Analyse — Claude evaluates all data across 6 categories
+
+    On success the results are written to PostgreSQL and cached in Redis.
+    On any unhandled exception the job is marked ``failed`` with the error
+    message stored for diagnostics.
+    """
     async with AsyncSessionLocal() as db:
+        # Mark job as in-progress
         audit: AuditResult | None = await db.get(AuditResult, job_id)
         if audit is None:
-            logger.error("Audit %s not found; aborting pipeline.", job_id)
+            logger.error("Pipeline: audit %s not found; aborting.", job_id)
             return
 
-        audit.status = AuditStatus.RUNNING
+        audit.status = AuditStatus.PROCESSING
         audit.started_at = datetime.now(timezone.utc)
         await db.commit()
 
         try:
-            crawl_data = await run_crawl(url, max_pages)
-            # Store crawl data but exclude the screenshot blob to keep the DB row lean
-            crawl_data_for_db = {k: v for k, v in crawl_data.items() if k != "screenshot"}
-            audit.crawl_data = crawl_data_for_db
+            # ── Stage 1: Crawl ────────────────────────────────────────────────
+            logger.info("[%s] Stage 1/3 – crawling %s", job_id, url)
+            crawl_data = await crawl_website(url)
 
-            lighthouse_data: dict | None = None
-            if include_lighthouse:
-                lighthouse_result = await run_lighthouse(url)
-                if not lighthouse_result.get("error"):
-                    audit.lighthouse_data = lighthouse_result
-                    lighthouse_data = lighthouse_result
-                else:
-                    logger.warning(
-                        "Lighthouse error for %s: %s", url, lighthouse_result.get("error")
-                    )
+            # Pull screenshot bytes out before storing in JSONB
+            screenshot_bytes = _extract_screenshot(crawl_data)
+            crawl_for_results = {k: v for k, v in crawl_data.items() if k != "screenshot"}
 
-            analysis = await run_analysis(crawl_data, lighthouse_data)
+            if crawl_data.get("error"):
+                raise RuntimeError(f"Crawl failed: {crawl_data['error']}")
 
-            # Persist the full Claude analysis for rich API responses
-            audit.analysis_result = analysis
+            # ── Stage 2: Lighthouse ───────────────────────────────────────────
+            logger.info("[%s] Stage 2/3 – running Lighthouse", job_id)
+            lighthouse_result = await run_lighthouse(url)
+            lighthouse_for_results: dict[str, Any] | None = (
+                lighthouse_result if not lighthouse_result.get("error") else None
+            )
+            if lighthouse_result.get("error"):
+                logger.warning(
+                    "[%s] Lighthouse error (non-fatal): %s",
+                    job_id,
+                    lighthouse_result["error"],
+                )
+
+            # ── Stage 3: Claude analysis ──────────────────────────────────────
+            logger.info("[%s] Stage 3/3 – running Claude analysis (mode=%s)", job_id, mode)
+            if mode == "roast":
+                analysis = await analyze_website_roast(crawl_data, lighthouse_for_results)
+            else:
+                analysis = await analyze_website(crawl_data, lighthouse_for_results)
+
+            # ── Persist results ───────────────────────────────────────────────
+            audit.results = {
+                "crawl": crawl_for_results,
+                "lighthouse": lighthouse_for_results,
+                "analysis": analysis,
+            }
+            audit.screenshot = screenshot_bytes
             audit.ai_summary = analysis.get("summary", "")
+            audit.overall_score = analysis.get("overall_score")
+            audit.status = AuditStatus.COMPLETED
+            audit.completed_at = datetime.now(timezone.utc)
 
-            # Persist per-category scores as individual CategoryScore rows
-            categories: dict = analysis.get("categories", {})
+            # Persist per-category scores
+            categories: dict[str, dict] = analysis.get("categories", {})
             for cat_key, cat_data in categories.items():
                 score_val = float(cat_data.get("score", 0))
-                # Scores are 0-10; derive label from that scale
-                if score_val >= 8:
-                    label = "Good"
-                elif score_val >= 5:
-                    label = "Needs Improvement"
-                else:
-                    label = "Poor"
                 db.add(
                     CategoryScore(
                         audit_result_id=job_id,
                         category=cat_key,
                         score=score_val,
-                        label=label,
+                        label=_score_label(score_val),
                         details={"findings": cat_data.get("findings", [])},
                     )
                 )
 
-            audit.status = AuditStatus.COMPLETED
-            audit.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+            # Reload to get category_scores populated via selectin
+            await db.refresh(audit)
+
+            logger.info(
+                "[%s] Audit completed – overall score: %s/100",
+                job_id,
+                audit.overall_score,
+            )
+
+            # ── Cache results in Redis ─────────────────────────────────────────
+            redis = await get_redis()
+            response_payload = _audit_to_response(audit).model_dump()
+
+            # Cache by job_id (for GET /api/audit/{job_id})
+            await redis.setex(
+                _result_cache_key(job_id),
+                _RESULT_TTL_S,
+                json.dumps(response_payload, default=str),
+            )
+            # Cache URL→job_id mapping (for POST deduplication)
+            await redis.setex(
+                _url_cache_key(url, mode),
+                _RESULT_TTL_S,
+                str(job_id),
+            )
 
         except Exception as exc:
-            logger.exception("Audit pipeline failed for job %s: %s", job_id, exc)
+            logger.exception("[%s] Audit pipeline failed: %s", job_id, exc)
             audit.status = AuditStatus.FAILED
             audit.error_message = str(exc)
             audit.completed_at = datetime.now(timezone.utc)
-
-        await db.commit()
+            await db.commit()

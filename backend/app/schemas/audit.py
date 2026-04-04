@@ -1,6 +1,10 @@
+"""Pydantic request/response schemas for the Site Audit AI API."""
+
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, HttpUrl, field_validator
 
@@ -13,79 +17,110 @@ from app.models.audit import AuditStatus
 
 
 class AuditRequest(BaseModel):
-    url: HttpUrl
-    max_pages: int = 10
-    include_lighthouse: bool = True
+    """Body accepted by ``POST /api/audit``."""
 
-    @field_validator("max_pages")
+    url: HttpUrl
+    mode: Literal["professional", "roast"] = "professional"
+
+    @field_validator("url")
     @classmethod
-    def validate_max_pages(cls, v: int) -> int:
-        if v < 1 or v > 50:
-            raise ValueError("max_pages must be between 1 and 50")
+    def validate_url_scheme(cls, v: HttpUrl) -> HttpUrl:
+        """Reject non-HTTP/HTTPS URLs early with a clear message."""
+        if str(v).split("://")[0] not in ("http", "https"):
+            raise ValueError("URL must use http or https scheme")
         return v
 
 
 # ---------------------------------------------------------------------------
-# Response schemas
+# Shared sub-schemas
 # ---------------------------------------------------------------------------
 
 
 class CategoryScoreSchema(BaseModel):
+    """Per-category score row returned inside audit responses."""
+
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
     category: str
     score: float
-    label: str | None
-    details: dict | None
-
-
-class AuditResultSchema(BaseModel):
-    model_config = {"from_attributes": True}
-
-    id: uuid.UUID
-    url: str
-    status: AuditStatus
-    error_message: str | None
-    ai_summary: str | None
-    crawl_data: dict | None
-    lighthouse_data: dict | None
-    analysis_result: dict | None
-    category_scores: list[CategoryScoreSchema]
-    created_at: datetime
-    started_at: datetime | None
-    completed_at: datetime | None
-
-
-class AuditCreateResponse(BaseModel):
-    job_id: uuid.UUID
-    status: AuditStatus
-    message: str
-
-
-class AuditStatusResponse(BaseModel):
-    model_config = {"from_attributes": True}
-
-    job_id: uuid.UUID
-    url: str
-    status: AuditStatus
-    error_message: str | None
-
-    # Plain-text executive summary
-    ai_summary: str | None
-
-    # Full Claude analysis (overall_score, categories, priority_fixes, mode)
-    overall_score: int | None = None
-    analysis_result: dict | None = None
-
-    category_scores: list[CategoryScoreSchema]
-    created_at: datetime
-    started_at: datetime | None
-    completed_at: datetime | None
+    label: str | None = None
+    details: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
-# Lighthouse schemas
+# POST /api/audit  →  202 Accepted
+# ---------------------------------------------------------------------------
+
+
+class AuditCreateResponse(BaseModel):
+    """Returned immediately after a job is accepted.
+
+    The caller should poll ``GET /api/audit/{job_id}`` until
+    ``status`` is ``"completed"`` or ``"failed"``.
+    """
+
+    job_id: uuid.UUID
+    status: AuditStatus
+    cached: bool = False  # True when an existing result was returned from cache
+
+
+# ---------------------------------------------------------------------------
+# GET /api/audit/{job_id}
+# ---------------------------------------------------------------------------
+
+
+class AuditResultResponse(BaseModel):
+    """Full audit result returned by ``GET /api/audit/{job_id}``."""
+
+    job_id: uuid.UUID
+    url: str
+    mode: str
+    status: AuditStatus
+    error_message: str | None = None
+
+    # High-level summary fields
+    ai_summary: str | None = None
+    overall_score: int | None = None
+
+    # Complete structured results (crawl + lighthouse + analysis)
+    results: dict[str, Any] | None = None
+
+    # Per-category breakdown
+    category_scores: list[CategoryScoreSchema] = []
+
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# GET /api/audit/history
+# ---------------------------------------------------------------------------
+
+
+class AuditHistoryItem(BaseModel):
+    """Single row returned in the audit history list."""
+
+    job_id: uuid.UUID
+    url: str
+    mode: str
+    status: AuditStatus
+    overall_score: int | None = None
+    ai_summary: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class AuditHistoryResponse(BaseModel):
+    """Response envelope for the audit history endpoint."""
+
+    audits: list[AuditHistoryItem]
+    total: int
+
+
+# ---------------------------------------------------------------------------
+# Lighthouse sub-schemas (used internally and optionally in responses)
 # ---------------------------------------------------------------------------
 
 
@@ -162,7 +197,7 @@ class LighthouseResultSchema(BaseModel):
     diagnostics: Diagnostics = Diagnostics()
 
     @classmethod
-    def from_service_dict(cls, data: dict[str, Any]) -> "LighthouseResultSchema":
+    def from_service_dict(cls, data: dict[str, Any]) -> LighthouseResultSchema:
         """Construct from the raw dict returned by :func:`run_lighthouse`."""
         return cls(
             url=data.get("url", ""),
@@ -189,7 +224,7 @@ class LighthouseResultSchema(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Health check schema
+# Health check
 # ---------------------------------------------------------------------------
 
 
