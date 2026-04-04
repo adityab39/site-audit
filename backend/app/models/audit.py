@@ -1,13 +1,19 @@
 """SQLAlchemy ORM models for the Site Audit AI application.
 
+Cross-database compatibility
+----------------------------
+All column types are dialect-agnostic so the same model works with both
+SQLite (local dev, zero setup) and PostgreSQL (Docker / production):
+
+  Uuid        – native UUID on PostgreSQL,  CHAR(32) on SQLite
+  JSON        – native JSON  on PostgreSQL,  TEXT     on SQLite
+  LargeBinary – BYTEA        on PostgreSQL,  BLOB     on SQLite
+  SAEnum      – native ENUM  on PostgreSQL,  VARCHAR  on SQLite
+
 Tables
 ------
-audit_results   – one row per audit job; stores all collected data as JSONB
-category_scores – one row per scored category, linked to an audit_results row
-
-NOTE: columns were consolidated in this version. If you have an existing
-      database, drop and recreate the container (dev) or run an Alembic
-      migration (production).
+audit_results   – one row per audit job
+category_scores – one row per scored category, linked to audit_results
 """
 
 from __future__ import annotations
@@ -16,10 +22,18 @@ import uuid
 from datetime import datetime
 from enum import Enum as PyEnum
 
-from sqlalchemy import DateTime, Float, Integer, LargeBinary, String, Text
-from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import (
+    DateTime,
+    Enum as SAEnum,
+    Float,
+    ForeignKey,
+    Integer,
+    JSON,
+    LargeBinary,
+    String,
+    Text,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -36,9 +50,7 @@ class AuditStatus(str, PyEnum):
 class AuditResult(Base):
     """One row per audit job.
 
-    ``results`` is a JSONB column with three nested keys:
-
-    .. code-block:: json
+    ``results`` is a JSON column with three nested keys::
 
         {
             "crawl":      { ... },
@@ -47,14 +59,13 @@ class AuditResult(Base):
         }
 
     ``screenshot`` stores the raw PNG bytes of the full-page screenshot
-    captured by Playwright. It is kept in a separate ``BYTEA`` column so
-    that the JSONB ``results`` column stays compact and query-friendly.
+    in a separate column so the JSON ``results`` column stays compact.
     """
 
     __tablename__ = "audit_results"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
     )
@@ -67,17 +78,16 @@ class AuditResult(Base):
         index=True,
     )
 
-    # Human-readable error message if the pipeline failed
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Quick-access columns (denormalised from results for efficient querying)
+    # Denormalised quick-access columns (copied from results for fast queries)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     overall_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # Full collected data — crawl, lighthouse, and Claude analysis
-    results: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Full collected data: crawl, lighthouse, and Claude analysis
+    results: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
-    # Full-page PNG screenshot (raw bytes stored separately for JSONB efficiency)
+    # Full-page PNG screenshot (raw bytes, kept separate from JSON column)
     screenshot: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     # Timestamps
@@ -93,7 +103,6 @@ class AuditResult(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    # Per-category scores (one row each for easy structured access)
     category_scores: Mapped[list[CategoryScore]] = relationship(
         "CategoryScore",
         back_populates="audit_result",
@@ -114,12 +123,12 @@ class CategoryScore(Base):
     __tablename__ = "category_scores"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
     )
     audit_result_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         ForeignKey("audit_results.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -127,7 +136,7 @@ class CategoryScore(Base):
     category: Mapped[str] = mapped_column(String(128), nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False)
     label: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    details: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     audit_result: Mapped[AuditResult] = relationship(
         "AuditResult",

@@ -25,8 +25,9 @@ settings = get_settings()
 # Constants
 # ---------------------------------------------------------------------------
 
-OVERALL_TIMEOUT_S: float = 30.0
+OVERALL_TIMEOUT_S: float = 60.0
 PAGE_LOAD_TIMEOUT_MS: int = 30_000  # Playwright uses milliseconds
+JS_SETTLE_MS: int = 3_000           # wait after DOMContentLoaded for JS to render
 
 _CTA_KEYWORDS: frozenset[str] = frozenset(
     {
@@ -83,8 +84,8 @@ async def crawl_website(url: str) -> dict[str, Any]:
                 timeout=OVERALL_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
-            logger.warning("Overall 30-second timeout hit for %s", url)
-            return _error_result(url, "Crawl timed out after 30 seconds")
+            logger.warning("Overall 60-second timeout hit for %s", url)
+            return _error_result(url, "Crawl timed out after 60 seconds")
         except CrawlError as exc:
             logger.warning("Crawl error for %s: %s", url, exc)
             return _error_result(url, str(exc))
@@ -109,47 +110,87 @@ async def _extract(browser: Browser, url: str) -> dict[str, Any]:
             "+https://github.com/site-audit-ai)"
         ),
     )
+    # Partial data collected before any timeout — returned instead of failing.
+    partial: dict[str, Any] = {}
+    response: Response | None = None
+
     try:
-        response: Response | None = await page.goto(
+        # Use domcontentloaded instead of networkidle — networkidle hangs
+        # on sites with persistent connections, analytics, or websockets.
+        response = await page.goto(
             url,
             timeout=PAGE_LOAD_TIMEOUT_MS,
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
         )
         if response is None:
             raise CrawlError(f"No response received for {url}")
         if response.status >= 400:
-            raise CrawlError(
-                f"HTTP {response.status} received for {url}"
-            )
+            raise CrawlError(f"HTTP {response.status} received for {url}")
 
-        # Run all extraction tasks concurrently where possible
-        (
-            metadata,
-            content,
-            technical,
-            design,
-            cta,
-        ) = await asyncio.gather(
-            _extract_metadata(page, url),
-            _extract_content(page, url),
-            _extract_technical(page, url),
-            _extract_design(page),
-            _extract_cta(page),
-        )
+        # Give JavaScript time to render after the DOM is ready.
+        await page.wait_for_timeout(JS_SETTLE_MS)
+
+        # Run all extraction tasks concurrently where possible.
+        try:
+            (
+                metadata,
+                content,
+                technical,
+                design,
+                cta,
+            ) = await asyncio.gather(
+                _extract_metadata(page, url),
+                _extract_content(page, url),
+                _extract_technical(page, url),
+                _extract_design(page),
+                _extract_cta(page),
+            )
+            partial = {
+                "metadata": metadata,
+                "content": content,
+                "technical": technical,
+                "design": design,
+                "cta": cta,
+            }
+        except Exception as extract_exc:
+            # Extraction partially failed — log and continue with whatever
+            # was collected; screenshot is still attempted below.
+            logger.warning("Partial extraction error for %s: %s", url, extract_exc)
 
         screenshot_b64 = await _take_screenshot(page)
 
         return {
             "url": url,
-            "status_code": response.status,
-            "metadata": metadata,
-            "content": content,
-            "technical": technical,
-            "design": design,
-            "cta": cta,
+            "status_code": response.status if response else None,
+            "metadata": partial.get("metadata", {}),
+            "content": partial.get("content", {}),
+            "technical": partial.get("technical", {"has_ssl": url.startswith("https://")}),
+            "design": partial.get("design", {}),
+            "cta": partial.get("cta", {}),
             "screenshot": screenshot_b64,
             "error": None,
         }
+
+    except CrawlError:
+        raise  # re-raise so crawl_website() handles it as a named error
+
+    except Exception as exc:
+        # Any other page-level error (including playwright TimeoutError from
+        # goto): log it and return whatever partial data was collected.
+        logger.warning("Page error for %s (%s) — returning partial data", url, exc)
+        screenshot_b64 = await _take_screenshot(page)
+        return {
+            "url": url,
+            "status_code": response.status if response else None,
+            "metadata": partial.get("metadata", {}),
+            "content": partial.get("content", {}),
+            "technical": partial.get("technical", {"has_ssl": url.startswith("https://")}),
+            "design": partial.get("design", {}),
+            "cta": partial.get("cta", {}),
+            "screenshot": screenshot_b64,
+            "error": str(exc),
+        }
+
     finally:
         await page.close()
 

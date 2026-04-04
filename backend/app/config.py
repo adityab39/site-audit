@@ -8,6 +8,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",  # silently ignore any .env keys not declared here
     )
 
     # Application
@@ -17,9 +18,13 @@ class Settings(BaseSettings):
     allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:8000"]
 
     # Database
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/site_audit"
+    # Default: SQLite for local dev (no PostgreSQL needed).
+    # Switch to postgresql+asyncpg://... for Docker / production.
+    database_url: str = "sqlite+aiosqlite:///./site_audit.db"
 
     # Redis
+    # Set redis_enabled=false to skip all caching when Redis is not installed.
+    redis_enabled: bool = True
     redis_url: str = "redis://localhost:6379/0"
     cache_ttl_seconds: int = 3600
 
@@ -35,10 +40,9 @@ class Settings(BaseSettings):
     # Lighthouse
     lighthouse_binary: str = "lighthouse"
     lighthouse_timeout_ms: int = 60_000
-    # Path to the Chrome/Chromium binary Lighthouse should use.
-    # Defaults to the system chromium installed in the Docker image.
-    # Set to empty string to let Lighthouse auto-detect.
-    lighthouse_chrome_path: str = "/usr/bin/chromium"
+    # Empty = Lighthouse auto-detects Chrome (recommended for local dev on Mac).
+    # Docker default: /usr/bin/chromium
+    lighthouse_chrome_path: str = ""
 
     # Worker / job settings
     job_expiry_seconds: int = 86_400  # 24 hours

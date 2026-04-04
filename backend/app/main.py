@@ -1,15 +1,15 @@
 """Site Audit AI – FastAPI application entry point."""
 
 import logging
-from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes import router
 from app.config import get_settings
 from app.database import Base, close_redis, engine, get_redis
-from app.api.routes import router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,16 +26,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("  %s  v%s  starting up", settings.app_name, settings.app_version)
     logger.info("━" * 60)
 
-    # Create all database tables if they do not exist.
-    # For existing databases with schema changes, use Alembic migrations.
+    # Create all database tables that do not already exist.
+    # Works for both SQLite (local dev) and PostgreSQL (production).
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("✓ Database tables verified / created")
+    db_label = "SQLite" if "sqlite" in settings.database_url else "PostgreSQL"
+    logger.info("✓ %s tables verified / created", db_label)
 
-    # Warm up Redis connection and confirm reachability
-    redis = await get_redis()
-    await redis.ping()
-    logger.info("✓ Redis connection established")
+    # Redis — get_redis() checks REDIS_ENABLED before any connection attempt.
+    # If disabled or unreachable it returns _NoopRedis and never raises.
+    if settings.redis_enabled:
+        await get_redis()  # establishes + validates the connection
+        logger.info("✓ Redis enabled — connecting to %s", settings.redis_url)
+    else:
+        logger.info("✓ Redis disabled — caching skipped (REDIS_ENABLED=false)")
 
     logger.info("✓ CORS origins: %s", settings.allowed_origins)
     logger.info("✓ Claude model: %s", settings.claude_model)

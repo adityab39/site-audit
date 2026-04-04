@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -334,7 +334,7 @@ async def delete_audit(
     job_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
-) -> None:
+) -> Response:
     """Permanently delete an audit record and its cached entries."""
     audit: AuditResult | None = await db.get(AuditResult, job_id)
     if audit is None:
@@ -351,6 +351,7 @@ async def delete_audit(
     await db.delete(audit)
     await db.commit()
     logger.info("Audit %s deleted.", job_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------
