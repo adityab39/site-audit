@@ -118,18 +118,20 @@ async def run_lighthouse(url: str) -> dict[str, Any]:
 
 
 def _build_cmd(url: str) -> list[str]:
-    chrome_flags = "--headless --no-sandbox --disable-gpu --disable-dev-shm-usage"
     cmd: list[str] = [
         settings.lighthouse_binary,
         url,
         "--output=json",
-        "--output-path=stdout",   # stream JSON to stdout; avoids temp-file issues
-        f'--chrome-flags={chrome_flags}',
+        "--output-path=stdout",
+        '--chrome-flags=--headless --no-sandbox --disable-gpu',
         f"--only-categories={','.join(_CATEGORIES)}",
-        "--quiet",                # suppress progress output on stderr
+        "--quiet",
     ]
-    if settings.lighthouse_chrome_path:
-        cmd.append(f"--chrome-path={settings.lighthouse_chrome_path}")
+    # Only pass --chrome-path when explicitly set; otherwise Lighthouse
+    # auto-detects the system Chrome (works on Mac without any config).
+    chrome_path = (settings.lighthouse_chrome_path or "").strip()
+    if chrome_path:
+        cmd.append(f"--chrome-path={chrome_path}")
     return cmd
 
 
