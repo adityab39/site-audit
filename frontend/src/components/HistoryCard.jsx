@@ -1,7 +1,15 @@
 import { useNavigate } from 'react-router-dom'
 
-function ScorePill({ score }) {
-  if (score == null) return <span className="badge bg-zinc-800 text-zinc-500">—</span>
+function ScorePill({ score, status }) {
+  // Failed audits get an explicit red "Failed" badge instead of an empty dash
+  if (status === 'failed') {
+    return (
+      <span className="badge border bg-red-500/15 text-red-400 border-red-500/30 font-semibold">
+        Failed
+      </span>
+    )
+  }
+  if (score == null) return <span className="badge bg-zinc-800 text-zinc-500 border border-zinc-700">—</span>
   const color =
     score >= 75 ? 'bg-green-500/15 text-green-400 border-green-500/30'
     : score >= 50 ? 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30'
@@ -15,7 +23,9 @@ function ScorePill({ score }) {
 
 function relativeTime(iso) {
   if (!iso) return ''
-  const diff = Date.now() - new Date(iso).getTime()
+  // Append 'Z' if no timezone is specified so the browser treats it as UTC
+  const normalized = /Z$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z'
+  const diff = Date.now() - new Date(normalized).getTime()
   const m = Math.floor(diff / 60000)
   if (m < 1) return 'just now'
   if (m < 60) return `${m}m ago`
@@ -44,8 +54,10 @@ export default function HistoryCard({ audit }) {
       </div>
 
       <div className="flex items-center gap-3 flex-shrink-0">
-        <ScorePill score={audit.overall_score} />
-        <span className="text-xs text-zinc-600 hidden sm:block">{relativeTime(audit.created_at)}</span>
+        <ScorePill score={audit.overall_score} status={audit.status} />
+        <span className="text-xs text-zinc-600 hidden sm:block w-16 text-right">
+          {relativeTime(audit.created_at)}
+        </span>
       </div>
 
       <svg

@@ -221,20 +221,35 @@ export default function Home() {
       </main>
 
       {/* ── Recent History ───────────────────────────────────────────── */}
-      {!historyLoading && history.length > 0 && (
-        <section className="relative z-10 w-full max-w-5xl mx-auto px-4 pb-16 animate-slide-up">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="h-px flex-1 bg-zinc-800" />
-            <span className="text-xs text-zinc-600 font-medium uppercase tracking-widest">Recent Audits</span>
-            <div className="h-px flex-1 bg-zinc-800" />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {history.slice(0, 6).map((audit) => (
-              <HistoryCard key={audit.job_id} audit={audit} />
-            ))}
-          </div>
-        </section>
-      )}
+      {!historyLoading && history.length > 0 && (() => {
+        // Deduplicate: keep only the most recent audit per URL
+        // History is already sorted newest-first from the API
+        const seen = new Set()
+        const deduped = history.filter((a) => {
+          if (seen.has(a.url)) return false
+          seen.add(a.url)
+          return true
+        })
+        return (
+          <section className="relative z-10 w-full max-w-5xl mx-auto px-4 pb-10 animate-slide-up">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="h-px flex-1 bg-zinc-800" />
+              <span className="text-xs text-zinc-600 font-medium uppercase tracking-widest">Recent Audits</span>
+              <div className="h-px flex-1 bg-zinc-800" />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {deduped.slice(0, 6).map((audit) => (
+                <HistoryCard key={audit.job_id} audit={audit} />
+              ))}
+            </div>
+          </section>
+        )
+      })()}
+
+      {/* ── Site footer ──────────────────────────────────────────────── */}
+      <footer className="relative z-10 text-center py-6 text-xs text-zinc-700">
+        Powered by Claude AI &amp; Lighthouse
+      </footer>
     </div>
   )
 }

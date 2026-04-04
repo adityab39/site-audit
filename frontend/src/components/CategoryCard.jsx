@@ -2,9 +2,24 @@ import { useState } from 'react'
 import { MiniScoreRing } from './ScoreRing'
 
 const SEVERITY_STYLES = {
-  critical: { dot: 'bg-red-500',    badge: 'bg-red-500/15 text-red-400 border-red-500/30',       label: 'Critical' },
-  warning:  { dot: 'bg-yellow-500', badge: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30', label: 'Warning' },
-  info:     { dot: 'bg-blue-500',   badge: 'bg-blue-500/15 text-blue-400 border-blue-500/30',     label: 'Info' },
+  critical: {
+    badge:      'bg-red-500/15 text-red-400 border-red-500/30',
+    leftBorder: 'border-l-red-500',
+    recBg:      'bg-red-500/5 border-red-500/15',
+    label:      'Critical',
+  },
+  warning: {
+    badge:      'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
+    leftBorder: 'border-l-yellow-500',
+    recBg:      'bg-yellow-500/5 border-yellow-500/15',
+    label:      'Warning',
+  },
+  info: {
+    badge:      'bg-blue-500/15 text-blue-400 border-blue-500/30',
+    leftBorder: 'border-l-blue-500',
+    recBg:      'bg-blue-500/5 border-blue-500/15',
+    label:      'Info',
+  },
 }
 
 const SCORE_BORDER = (s) =>
@@ -18,26 +33,24 @@ const SCORE_LABEL_STYLE = (s) =>
   : 'bg-red-500/15 text-red-400'
 
 function FindingItem({ finding }) {
-  const sev = SEVERITY_STYLES[finding.severity] || SEVERITY_STYLES.info
+  const sev = SEVERITY_STYLES[finding.severity] ?? SEVERITY_STYLES.info
 
   return (
-    <div className="flex gap-3 py-3 border-b border-zinc-800/60 last:border-0">
-      <div className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${sev.dot}`} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-start justify-between gap-2 mb-1">
-          <span className="text-sm font-medium text-zinc-200">{finding.title}</span>
-          <span className={`badge border flex-shrink-0 ${sev.badge}`}>{sev.label}</span>
-        </div>
-        {finding.description && (
-          <p className="text-xs text-zinc-400 mb-1.5 leading-relaxed">{finding.description}</p>
-        )}
-        {finding.recommendation && (
-          <div className="flex gap-1.5 items-start">
-            <span className="text-xs text-violet-400 flex-shrink-0 mt-0.5">→</span>
-            <p className="text-xs text-violet-300/80 leading-relaxed">{finding.recommendation}</p>
-          </div>
-        )}
+    <div className={`border-l-2 ${sev.leftBorder} pl-3 py-3 border-b border-zinc-800/60 last:border-b-0`}>
+      <div className="flex items-start justify-between gap-2 mb-1.5">
+        <span className="text-sm font-medium text-zinc-200 leading-snug">{finding.title}</span>
+        <span className={`badge border flex-shrink-0 ${sev.badge}`}>{sev.label}</span>
       </div>
+
+      {finding.description && (
+        <p className="text-xs text-zinc-400 mb-2 leading-relaxed">{finding.description}</p>
+      )}
+
+      {finding.recommendation && (
+        <div className={`rounded-lg px-3 py-2 border ${sev.recBg}`}>
+          <p className="text-xs text-zinc-300 leading-relaxed">{finding.recommendation}</p>
+        </div>
+      )}
     </div>
   )
 }
@@ -75,7 +88,7 @@ export default function CategoryCard({ name, score, label, findings = [] }) {
       {/* Expanded findings */}
       {expanded && (
         <div className="px-4 pb-4 animate-fade-in">
-          <div className="border-t border-zinc-800/60 pt-1">
+          <div className="border-t border-zinc-800/60 pt-2 space-y-0">
             {findings.length === 0 ? (
               <p className="text-sm text-zinc-500 py-3 text-center">No findings recorded.</p>
             ) : (

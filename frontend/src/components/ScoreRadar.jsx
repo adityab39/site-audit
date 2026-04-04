@@ -56,7 +56,7 @@ export default function ScoreRadar({ categoryScores = [] }) {
           dataKey="score"
           stroke="#8b5cf6"
           fill="#8b5cf6"
-          fillOpacity={0.2}
+          fillOpacity={0.4}
           strokeWidth={2}
           dot={{ fill: '#8b5cf6', r: 3 }}
         />

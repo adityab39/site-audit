@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useAuditPolling } from '../hooks/useAuditPolling'
 import ScoreRing from '../components/ScoreRing'
@@ -42,20 +42,28 @@ function ScoreLabel({ score }) {
 
 // ─── Lighthouse metrics row ───────────────────────────────────────────────────
 
+// Returns a Tailwind text-color class based on the metric's threshold ranges
+function cwvColor(label, raw) {
+  if (raw == null) return 'text-zinc-400'
+  switch (label) {
+    case 'LCP':       return raw < 2.5 ? 'text-green-400' : raw < 4    ? 'text-yellow-400' : 'text-red-400'
+    case 'TBT':       return raw < 200 ? 'text-green-400' : raw < 600   ? 'text-yellow-400' : 'text-red-400'
+    case 'CLS':       return raw < 0.1 ? 'text-green-400' : raw < 0.25  ? 'text-yellow-400' : 'text-red-400'
+    case 'FCP':       return raw < 1.8 ? 'text-green-400' : raw < 3    ? 'text-yellow-400' : 'text-red-400'
+    case 'Speed Idx': return raw < 3.4 ? 'text-green-400' : raw < 5.8  ? 'text-yellow-400' : 'text-red-400'
+    default:          return 'text-zinc-200'
+  }
+}
+
 function LighthouseMetrics({ lighthouse }) {
-  // Lighthouse data is stored as { scores, core_web_vitals, page_stats, diagnostics }
-  // It is only present in results when Lighthouse succeeded (no error key).
   if (!lighthouse || Object.keys(lighthouse).length === 0) return null
 
-  const cwv       = lighthouse.core_web_vitals  ?? {}
-  const pageStats = lighthouse.page_stats        ?? {}
-  const scores    = lighthouse.scores            ?? {}
+  const cwv       = lighthouse.core_web_vitals ?? {}
+  const pageStats = lighthouse.page_stats      ?? {}
+  const scores    = lighthouse.scores          ?? {}
 
-  // Helper: format seconds value
   const secs = (v) => v != null ? `${Number(v).toFixed(1)}s` : '—'
-  // Helper: format milliseconds
   const ms   = (v) => v != null ? `${Math.round(v)}ms`       : '—'
-  // Helper: format bytes → MB / KB
   const size = (bytes) => {
     if (bytes == null) return '—'
     if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`
@@ -63,15 +71,14 @@ function LighthouseMetrics({ lighthouse }) {
   }
 
   const metrics = [
-    { label: 'LCP',        value: secs(cwv.largest_contentful_paint) },
-    { label: 'TBT',        value: ms(cwv.total_blocking_time) },
-    { label: 'CLS',        value: cwv.cumulative_layout_shift != null ? Number(cwv.cumulative_layout_shift).toFixed(3) : '—' },
-    { label: 'FCP',        value: secs(cwv.first_contentful_paint) },
-    { label: 'Speed Idx',  value: secs(cwv.speed_index) },
-    { label: 'Page Size',  value: size(pageStats.total_page_size_bytes) },
+    { label: 'LCP',       raw: cwv.largest_contentful_paint, value: secs(cwv.largest_contentful_paint) },
+    { label: 'TBT',       raw: cwv.total_blocking_time,      value: ms(cwv.total_blocking_time) },
+    { label: 'CLS',       raw: cwv.cumulative_layout_shift,  value: cwv.cumulative_layout_shift != null ? Number(cwv.cumulative_layout_shift).toFixed(3) : '—' },
+    { label: 'FCP',       raw: cwv.first_contentful_paint,   value: secs(cwv.first_contentful_paint) },
+    { label: 'Speed Idx', raw: cwv.speed_index,              value: secs(cwv.speed_index) },
+    { label: 'Page Size', raw: null,                         value: size(pageStats.total_page_size_bytes) },
   ]
 
-  // Colour-code the Lighthouse performance score as a bonus pill
   const perfScore = scores.performance_score
   const perfColor = perfScore == null ? 'text-zinc-500'
     : perfScore >= 75 ? 'text-green-400'
@@ -82,7 +89,7 @@ function LighthouseMetrics({ lighthouse }) {
     <div className="space-y-3">
       {perfScore != null && (
         <p className="text-xs text-zinc-600">
-          Lighthouse performance score:{' '}
+          Lighthouse Performance Score:{' '}
           <span className={`font-bold ${perfColor}`}>{Math.round(perfScore)}/100</span>
         </p>
       )}
@@ -90,11 +97,45 @@ function LighthouseMetrics({ lighthouse }) {
         {metrics.map((m) => (
           <div key={m.label} className="glass-card border border-zinc-800 p-3 text-center rounded-xl">
             <p className="text-[11px] text-zinc-500 mb-1 uppercase tracking-wider">{m.label}</p>
-            <p className="text-sm font-bold text-zinc-200">{m.value}</p>
+            <p className={`text-sm font-bold ${cwvColor(m.label, m.raw)}`}>{m.value}</p>
           </div>
         ))}
       </div>
     </div>
+  )
+}
+
+// ─── Share button ─────────────────────────────────────────────────────────────
+
+function ShareButton() {
+  const [copied, setCopied] = useState(false)
+  const handleShare = () => {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+  return (
+    <button
+      onClick={handleShare}
+      className="flex items-center gap-2 border border-zinc-700 hover:border-zinc-600 text-zinc-400 hover:text-zinc-200 font-medium px-5 py-2.5 rounded-xl transition-all text-sm"
+    >
+      {copied ? (
+        <>
+          <svg className="w-4 h-4 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+          <span className="text-green-400">Copied!</span>
+        </>
+      ) : (
+        <>
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+          </svg>
+          Share
+        </>
+      )}
+    </button>
   )
 }
 
@@ -229,12 +270,6 @@ export default function Results() {
 
   // ─── Results ───────────────────────────────────────────────────────────────
 
-  // Debug: log full response structure so field names are visible in DevTools
-  console.log('[SiteAudit] full response:', data)
-  console.log('[SiteAudit] lighthouse data:', data.results?.lighthouse)
-  console.log('[SiteAudit] lighthouse.core_web_vitals:', data.results?.lighthouse?.core_web_vitals)
-  console.log('[SiteAudit] lighthouse.page_stats:', data.results?.lighthouse?.page_stats)
-
   const analysis     = data.results?.analysis ?? {}
   const lighthouse   = data.results?.lighthouse ?? {}
   const priorityFixes = analysis.priority_fixes ?? []
@@ -358,20 +393,30 @@ export default function Results() {
           </section>
         )}
 
-        {/* ── Footer ───────────────────────────────────────────────────── */}
-        <section className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-zinc-800">
-          <span className="text-xs text-zinc-600">
-            Analyzed {new Date(data.completed_at ?? data.created_at).toLocaleString()}
-          </span>
-          <Link
-            to="/"
-            className="bg-violet-600 hover:bg-violet-500 text-white font-semibold px-6 py-3 rounded-xl transition-colors text-sm flex items-center gap-2"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-            </svg>
-            Analyze Another Site
-          </Link>
+        {/* ── Action footer ─────────────────────────────────────────────── */}
+        <section className="pt-4 border-t border-zinc-800 space-y-4">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+            <span className="text-xs text-zinc-600">
+              Analyzed {new Date((data.completed_at ?? data.created_at) + (/(Z|[+-]\d{2}:?\d{2})$/.test(data.completed_at ?? data.created_at ?? '') ? '' : 'Z')).toLocaleString()}
+            </span>
+            <div className="flex items-center gap-3 flex-wrap justify-center">
+              <ShareButton />
+              <Link
+                to="/"
+                className="bg-violet-600 hover:bg-violet-500 text-white font-semibold px-6 py-2.5 rounded-xl transition-colors text-sm flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+                </svg>
+                Analyze Another Site
+              </Link>
+            </div>
+          </div>
+
+          {/* Page footer */}
+          <p className="text-center text-xs text-zinc-700 pb-2">
+            Powered by Claude AI &amp; Lighthouse
+          </p>
         </section>
 
       </div>
