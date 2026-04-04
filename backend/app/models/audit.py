@@ -39,7 +39,13 @@ class AuditResult(Base):
     crawl_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     lighthouse_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    # Top-level AI summary
+    # Full structured Claude analysis result
+    # Contains: overall_score, summary, categories, priority_fixes, mode
+    # NOTE: if adding this column to an existing DB, run an Alembic migration
+    # or recreate the database container (fine for local dev).
+    analysis_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # Top-level AI summary (plain text copy of analysis_result.summary)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Timestamps

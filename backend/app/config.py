@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Anthropic / Claude
     anthropic_api_key: str = ""
-    claude_model: str = "claude-opus-4-5"
+    claude_model: str = "claude-sonnet-4-20250514"
     claude_max_tokens: int = 4096
 
     # Playwright

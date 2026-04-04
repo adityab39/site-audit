@@ -136,12 +136,15 @@ async def get_audit(
             detail=f"Audit job {job_id} not found.",
         )
 
+    analysis: dict = audit.analysis_result or {}
     response = AuditStatusResponse(
         job_id=audit.id,
         url=audit.url,
         status=audit.status,
         error_message=audit.error_message,
         ai_summary=audit.ai_summary,
+        overall_score=analysis.get("overall_score"),
+        analysis_result=audit.analysis_result,
         category_scores=[
             {
                 "id": score.id,
@@ -200,37 +203,45 @@ async def _run_audit_pipeline(
 
         try:
             crawl_data = await run_crawl(url, max_pages)
-            audit.crawl_data = crawl_data
+            # Store crawl data but exclude the screenshot blob to keep the DB row lean
+            crawl_data_for_db = {k: v for k, v in crawl_data.items() if k != "screenshot"}
+            audit.crawl_data = crawl_data_for_db
 
             lighthouse_data: dict | None = None
             if include_lighthouse:
-                lighthouse_data = await run_lighthouse(url)
-                if "error" not in lighthouse_data:
-                    audit.lighthouse_data = lighthouse_data
+                lighthouse_result = await run_lighthouse(url)
+                if not lighthouse_result.get("error"):
+                    audit.lighthouse_data = lighthouse_result
+                    lighthouse_data = lighthouse_result
                 else:
                     logger.warning(
-                        "Lighthouse error for %s: %s", url, lighthouse_data.get("error")
+                        "Lighthouse error for %s: %s", url, lighthouse_result.get("error")
                     )
-                    lighthouse_data = None
 
             analysis = await run_analysis(crawl_data, lighthouse_data)
 
+            # Persist the full Claude analysis for rich API responses
+            audit.analysis_result = analysis
             audit.ai_summary = analysis.get("summary", "")
 
-            for cat in analysis.get("categories", []):
-                label = cat.get("label")
-                if label is None:
-                    score = cat.get("score", 0.0)
-                    label = (
-                        "Good" if score >= 0.8 else "Needs Improvement" if score >= 0.5 else "Poor"
-                    )
+            # Persist per-category scores as individual CategoryScore rows
+            categories: dict = analysis.get("categories", {})
+            for cat_key, cat_data in categories.items():
+                score_val = float(cat_data.get("score", 0))
+                # Scores are 0-10; derive label from that scale
+                if score_val >= 8:
+                    label = "Good"
+                elif score_val >= 5:
+                    label = "Needs Improvement"
+                else:
+                    label = "Poor"
                 db.add(
                     CategoryScore(
                         audit_result_id=job_id,
-                        category=cat.get("category", "Unknown"),
-                        score=float(cat.get("score", 0.0)),
+                        category=cat_key,
+                        score=score_val,
                         label=label,
-                        details=cat.get("details"),
+                        details={"findings": cat_data.get("findings", [])},
                     )
                 )
 

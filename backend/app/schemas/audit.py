@@ -50,6 +50,7 @@ class AuditResultSchema(BaseModel):
     ai_summary: str | None
     crawl_data: dict | None
     lighthouse_data: dict | None
+    analysis_result: dict | None
     category_scores: list[CategoryScoreSchema]
     created_at: datetime
     started_at: datetime | None
@@ -69,7 +70,14 @@ class AuditStatusResponse(BaseModel):
     url: str
     status: AuditStatus
     error_message: str | None
+
+    # Plain-text executive summary
     ai_summary: str | None
+
+    # Full Claude analysis (overall_score, categories, priority_fixes, mode)
+    overall_score: int | None = None
+    analysis_result: dict | None = None
+
     category_scores: list[CategoryScoreSchema]
     created_at: datetime
     started_at: datetime | None
