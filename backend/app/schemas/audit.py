@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, HttpUrl, field_validator
 
@@ -20,7 +20,6 @@ class AuditRequest(BaseModel):
     """Body accepted by ``POST /api/audit``."""
 
     url: HttpUrl
-    mode: Literal["professional", "roast"] = "professional"
 
     @field_validator("url")
     @classmethod

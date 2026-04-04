@@ -5,9 +5,8 @@ structured JSON audit report with per-category scores and actionable findings.
 
 Public API
 ----------
-analyze_website(crawl_data, lighthouse_data)        → professional report
-analyze_website_roast(crawl_data, lighthouse_data)  → same data, humorous tone
-run_analysis(crawl_data, lighthouse_data)           → compat wrapper for pipeline
+analyze_website(crawl_data, lighthouse_data)  → professional report
+run_analysis(crawl_data, lighthouse_data)     → compat wrapper for pipeline
 """
 
 from __future__ import annotations
@@ -59,10 +58,10 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# System prompts
+# System prompt
 # ---------------------------------------------------------------------------
 
-_PROFESSIONAL_SYSTEM_PROMPT = """
+_SYSTEM_PROMPT = """
 You are a senior website conversion-optimisation and UX expert with 15 years of
 experience auditing SaaS, e-commerce, and marketing websites. You have deep expertise
 in copywriting, SEO, Core Web Vitals, accessibility, and conversion rate optimisation.
@@ -163,72 +162,7 @@ Respond with ONLY valid JSON — no markdown, no code fences, no explanation tex
   },
   "priority_fixes": [
     { "rank": 1, "category": "...", "title": "...", "impact": "high|medium|low", "effort": "quick|medium|redesign" }
-  ],
-  "mode": "professional"
-}
-""".strip()
-
-_ROAST_SYSTEM_PROMPT = """
-You are a brutally honest (but secretly helpful) website critic — think Gordon Ramsay
-if he audited landing pages instead of restaurants. You have the technical expertise of
-a senior conversion-optimisation consultant, but you deliver your findings with wit,
-sarcasm, and occasionally painful accuracy.
-
-The roast must be TECHNICALLY CORRECT. Every joke should point at a real problem.
-The developer/designer should finish reading laughing at themselves — and immediately
-knowing what to fix. Never be mean-spirited; always end recommendations on a helpful note.
-
-You will receive structured data from a website crawl and optional Lighthouse metrics.
-Roast the site across 6 categories, then give the top 5 priority fixes.
-
-━━━ SCORING ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Score each category from 0 to 10.
-  9-10  "Okay fine, this part doesn't suck."
-  7-8   "Could be worse. Like, a lot worse."
-  4-6   "We need to talk."
-  0-3   "Sir, this is a website."
-
-━━━ CATEGORIES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Same six categories as always. Same technical rigour. Very different bedside manner.
-
-1. copy_messaging  — Is anyone home in the headlines?
-2. seo_health      — A love letter to Google that Google never received
-3. performance     — The need for speed (that is not present)
-4. design_ux       — Visual chaos or delightful UX journey?
-5. trust_credibility — "Trust me bro" as a design pattern
-6. accessibility   — How many users are you accidentally excluding?
-
-━━━ ROAST FINDINGS FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Each finding:
-  severity       "critical" | "warning" | "info"
-  title          A witty, specific headline (cite real data where possible)
-  description    Humorous but technically precise observation. Reference actual
-                 data from the crawl (real page title, real scores, real counts).
-                 One good roast beats five generic ones.
-  recommendation Still genuinely helpful — end with what to actually do.
-                 Optionally add a quip: "I believe in you. Barely, but I do."
-
-━━━ PRIORITY FIXES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Top 5 highest-impact/lowest-effort wins. Titles can be funny but must be clear.
-
-━━━ RESPONSE FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ONLY valid JSON — no markdown, no code fences, no preamble.
-
-{
-  "overall_score": <integer 0-100>,
-  "summary": "<2-3 sentence roast-style executive summary — funny but accurate>",
-  "categories": {
-    "copy_messaging":    { "score": <0-10>, "findings": [ { "severity": "...", "title": "...", "description": "...", "recommendation": "..." } ] },
-    "seo_health":        { "score": <0-10>, "findings": [ ... ] },
-    "performance":       { "score": <0-10>, "findings": [ ... ] },
-    "design_ux":         { "score": <0-10>, "findings": [ ... ] },
-    "trust_credibility": { "score": <0-10>, "findings": [ ... ] },
-    "accessibility":     { "score": <0-10>, "findings": [ ... ] }
-  },
-  "priority_fixes": [
-    { "rank": 1, "category": "...", "title": "...", "impact": "high|medium|low", "effort": "quick|medium|redesign" }
-  ],
-  "mode": "roast"
+  ]
 }
 """.strip()
 
@@ -256,41 +190,17 @@ async def analyze_website(
     -------
     dict
         Full analysis result with ``overall_score``, ``summary``,
-        ``categories``, ``priority_fixes``, and ``mode="professional"``.
+        ``categories``, and ``priority_fixes``.
     """
     service = _AnalyzerService()
-    return await service.analyze(
-        system=_PROFESSIONAL_SYSTEM_PROMPT,
-        crawl_data=crawl_data,
-        lighthouse_data=lighthouse_data,
-        mode="professional",
-    )
-
-
-async def analyze_website_roast(
-    crawl_data: dict[str, Any],
-    lighthouse_data: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Run a roast-mode audit — same technical rigour, delivered with humour.
-
-    The roast mode uses an identical data context but instructs Claude to
-    present every finding with wit and sarcasm while remaining technically
-    accurate and actionable.
-    """
-    service = _AnalyzerService()
-    return await service.analyze(
-        system=_ROAST_SYSTEM_PROMPT,
-        crawl_data=crawl_data,
-        lighthouse_data=lighthouse_data,
-        mode="roast",
-    )
+    return await service.analyze(crawl_data=crawl_data, lighthouse_data=lighthouse_data)
 
 
 async def run_analysis(
     crawl_data: dict[str, Any],
     lighthouse_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Pipeline-facing wrapper — always runs in professional mode."""
+    """Pipeline-facing wrapper for :func:`analyze_website`."""
     return await analyze_website(crawl_data, lighthouse_data)
 
 
@@ -305,51 +215,41 @@ class _AnalyzerService:
 
     async def analyze(
         self,
-        system: str,
         crawl_data: dict[str, Any],
         lighthouse_data: dict[str, Any] | None,
-        mode: str,
     ) -> dict[str, Any]:
         """Build the user message, call Claude, parse and return results."""
         user_message = _build_audit_context(crawl_data, lighthouse_data)
 
-        raw_text = await self._call_claude(system, user_message)
+        raw_text = await self._call_claude(user_message)
         result = _try_parse_json(raw_text)
 
         if result is None:
-            logger.warning(
-                "Claude returned invalid JSON on first attempt (mode=%s); retrying.", mode
-            )
-            raw_text = await self._call_claude(system, user_message)
+            logger.warning("Claude returned invalid JSON on first attempt; retrying.")
+            raw_text = await self._call_claude(user_message)
             result = _try_parse_json(raw_text)
 
         if result is None:
             logger.error("Claude returned unparseable JSON after retry; using fallback.")
-            return _fallback_result(mode)
+            return _fallback_result()
 
-        result["mode"] = mode
         return result
 
-    async def _call_claude(self, system: str, user: str) -> str:
-        """Call the Claude API with exponential-backoff retry on transient errors.
-
-        Raises the last exception if all retries are exhausted.
-        """
+    async def _call_claude(self, user: str) -> str:
+        """Call the Claude API with exponential-backoff retry on transient errors."""
         last_exc: Exception | None = None
 
         for attempt in range(_MAX_API_RETRIES + 1):
             if attempt > 0:
                 delay = _RETRY_DELAY_S * attempt
-                logger.info(
-                    "Claude API retry %d/%d in %.1fs…", attempt, _MAX_API_RETRIES, delay
-                )
+                logger.info("Claude API retry %d/%d in %.1fs…", attempt, _MAX_API_RETRIES, delay)
                 await asyncio.sleep(delay)
 
             try:
                 message = await self._client.messages.create(
                     model=settings.claude_model,
                     max_tokens=settings.claude_max_tokens,
-                    system=system,
+                    system=_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user}],
                 )
                 return message.content[0].text
@@ -364,7 +264,6 @@ class _AnalyzerService:
                 )
 
             except anthropic.APIError as exc:
-                # Non-retryable API error (e.g. bad auth, invalid request)
                 logger.error("Non-retryable Claude API error: %s", exc)
                 raise
 
@@ -392,7 +291,6 @@ def _build_audit_context(
     design = crawl_data.get("design", {})
     cta = crawl_data.get("cta", {})
 
-    # Summarise links: send sample + counts rather than the full list
     all_links: list[dict] = content.get("links", [])
     external_links = [l for l in all_links if l.get("is_external")]
     link_summary = {
@@ -400,11 +298,10 @@ def _build_audit_context(
         "external": len(external_links),
         "sample_texts": [l.get("text", "") for l in all_links[:12] if l.get("text")],
         "external_domains": list(
-            {l["href"].split("/")[2] for l in external_links if l.get("href")} # noqa: S105
+            {l["href"].split("/")[2] for l in external_links if l.get("href")}
         )[:8],
     }
 
-    # Summarise images: counts + missing-alt tally + small sample
     all_images: list[dict] = content.get("images", [])
     images_missing_alt = [i for i in all_images if not i.get("alt")]
     image_summary = {
@@ -420,7 +317,6 @@ def _build_audit_context(
         ],
     }
 
-    # Crawl context dict — clean, focused, no blobs
     crawl_context: dict[str, Any] = {
         "url": crawl_data.get("url"),
         "status_code": crawl_data.get("status_code"),
@@ -469,7 +365,6 @@ def _build_audit_context(
         json.dumps(crawl_context, indent=2, default=str),
     ]
 
-    # Attach Lighthouse data only when it succeeded
     if lighthouse_data and not lighthouse_data.get("error"):
         lh_context: dict[str, Any] = {
             "scores": lighthouse_data.get("scores", {}),
@@ -477,21 +372,11 @@ def _build_audit_context(
             "page_stats": lighthouse_data.get("page_stats", {}),
             "diagnostics": lighthouse_data.get("diagnostics", {}),
         }
-        sections += [
-            "",
-            "## Lighthouse Performance Data",
-            json.dumps(lh_context, indent=2, default=str),
-        ]
+        sections += ["", "## Lighthouse Performance Data", json.dumps(lh_context, indent=2, default=str)]
     else:
-        sections += [
-            "",
-            "## Lighthouse Performance Data",
-            "Not available — evaluate performance from crawl data only.",
-        ]
+        sections += ["", "## Lighthouse Performance Data", "Not available — evaluate performance from crawl data only."]
 
-    sections.append(
-        "\n\nAnalyse the website using the data above and return your JSON audit report."
-    )
+    sections.append("\n\nAnalyse the website using the data above and return your JSON audit report.")
     return "\n".join(sections)
 
 
@@ -505,16 +390,12 @@ def _try_parse_json(raw: str) -> dict[str, Any] | None:
     if not raw:
         return None
     text = raw.strip()
-    # Strip markdown code fences if Claude wrapped the JSON
     if text.startswith("```"):
         lines = text.splitlines()
-        text = "\n".join(
-            line for line in lines if not line.startswith("```")
-        ).strip()
+        text = "\n".join(line for line in lines if not line.startswith("```")).strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Fall back to extracting the outermost {...} block
         start = text.find("{")
         end = text.rfind("}") + 1
         if start == -1 or end == 0:
@@ -531,7 +412,7 @@ def _try_parse_json(raw: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def _fallback_result(mode: str) -> dict[str, Any]:
+def _fallback_result() -> dict[str, Any]:
     """Return a minimal valid result when Claude's response cannot be parsed."""
     empty_category: dict[str, Any] = {"score": 0, "findings": []}
     return {
@@ -542,6 +423,5 @@ def _fallback_result(mode: str) -> dict[str, Any]:
         ),
         "categories": {key: dict(empty_category) for key in CATEGORY_KEYS},
         "priority_fixes": [],
-        "mode": mode,
         "error": "Analysis failed: could not parse Claude response after retries.",
     }

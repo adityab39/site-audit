@@ -11,15 +11,14 @@ const PLACEHOLDERS = [
 ]
 
 export default function Home() {
-  const [url, setUrl]                   = useState('')
-  const [mode, setMode]                 = useState('professional')
-  const [loading, setLoading]           = useState(false)
-  const [error, setError]               = useState('')
-  const [history, setHistory]           = useState([])
+  const [url, setUrl]                       = useState('')
+  const [loading, setLoading]               = useState(false)
+  const [error, setError]                   = useState('')
+  const [history, setHistory]               = useState([])
   const [historyLoading, setHistoryLoading] = useState(true)
-  const [placeholder, setPlaceholder]  = useState(PLACEHOLDERS[0])
-  const navigate  = useNavigate()
-  const inputRef  = useRef(null)
+  const [placeholder, setPlaceholder]       = useState(PLACEHOLDERS[0])
+  const navigate = useNavigate()
+  const inputRef = useRef(null)
 
   useEffect(() => {
     let i = 0
@@ -45,7 +44,7 @@ export default function Home() {
     setLoading(true)
     setError('')
     try {
-      const result = await submitAudit(fullUrl, mode)
+      const result = await submitAudit(fullUrl)
       navigate(`/audit/${result.job_id}`)
     } catch (err) {
       setError(err.message || 'Failed to start audit. Please check the URL and try again.')
@@ -86,7 +85,6 @@ export default function Home() {
 
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-5">
-            {/* URL input */}
             <div
               className={`flex items-center bg-zinc-900 border rounded-2xl p-1.5 transition-all duration-200 ${
                 error
@@ -125,50 +123,6 @@ export default function Home() {
 
             {error && (
               <p className="text-red-400 text-sm text-center animate-fade-in">{error}</p>
-            )}
-
-            {/* Mode toggle */}
-            <div className="flex items-center justify-center gap-4">
-              <button
-                type="button"
-                onClick={() => setMode('professional')}
-                className={`text-sm font-medium transition-colors ${
-                  mode === 'professional' ? 'text-violet-400' : 'text-zinc-600 hover:text-zinc-400'
-                }`}
-              >
-                Professional
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setMode(mode === 'professional' ? 'roast' : 'professional')}
-                className={`relative w-12 h-6 rounded-full transition-colors duration-200 flex-shrink-0 ${
-                  mode === 'roast' ? 'bg-orange-500' : 'bg-zinc-700'
-                }`}
-                aria-label="Toggle mode"
-              >
-                <span
-                  className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all duration-200 ${
-                    mode === 'roast' ? 'left-7' : 'left-1'
-                  }`}
-                />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setMode('roast')}
-                className={`text-sm font-medium transition-colors ${
-                  mode === 'roast' ? 'text-orange-400' : 'text-zinc-600 hover:text-zinc-400'
-                }`}
-              >
-                Roast Mode
-              </button>
-            </div>
-
-            {mode === 'roast' && (
-              <p className="text-center text-xs text-orange-400/70 animate-fade-in">
-                Brutally honest — Claude will tear your site apart, technically and creatively.
-              </p>
             )}
           </form>
 

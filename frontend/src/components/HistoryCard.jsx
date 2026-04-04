@@ -24,12 +24,6 @@ function relativeTime(iso) {
   return `${Math.floor(h / 24)}d ago`
 }
 
-function ModePill({ mode }) {
-  return mode === 'roast'
-    ? <span className="badge bg-orange-500/10 text-orange-400 border border-orange-500/20 text-[10px]">Roast</span>
-    : <span className="badge bg-zinc-800 text-zinc-500 text-[10px]">Pro</span>
-}
-
 export default function HistoryCard({ audit }) {
   const navigate = useNavigate()
   const domain = (() => {
@@ -42,8 +36,6 @@ export default function HistoryCard({ audit }) {
       onClick={() => navigate(`/audit/${audit.job_id}`)}
       className="w-full flex items-center gap-3 px-4 py-3 bg-zinc-900/60 border border-zinc-800 rounded-xl hover:border-violet-500/40 hover:bg-zinc-900 transition-all duration-150 text-left group"
     >
-      <ModePill mode={audit.mode} />
-
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium text-zinc-200 truncate group-hover:text-white transition-colors">
           {domain}

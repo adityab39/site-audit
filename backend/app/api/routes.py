@@ -39,7 +39,7 @@ from app.schemas.audit import (
     CategoryScoreSchema,
     HealthResponse,
 )
-from app.services.analyzer import analyze_website, analyze_website_roast
+from app.services.analyzer import analyze_website
 from app.services.crawler import crawl_website
 from app.services.lighthouse import run_lighthouse
 
@@ -178,20 +178,20 @@ async def create_audit(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ) -> AuditCreateResponse:
-    """Accept a URL and mode, kick off a background audit, return a job ID.
+    """Accept a URL, kick off a background audit, return a job ID.
 
-    **Cache behaviour** – if the same URL and mode were successfully audited
-    within the last 24 hours the existing ``job_id`` is returned immediately
+    **Cache behaviour** – if the same URL was successfully audited within the
+    last 24 hours the existing ``job_id`` is returned immediately
     (``cached: true``) without launching a new pipeline run.
     """
     url = str(payload.url)
-    mode = payload.mode
+    mode = "professional"
 
     # ── 1. Check URL-level cache ──────────────────────────────────────────────
     url_key = _url_cache_key(url, mode)
     cached_job_id: str | None = await redis.get(url_key)
     if cached_job_id:
-        logger.info("Cache hit for %s (mode=%s) → job %s", url, mode, cached_job_id)
+        logger.info("Cache hit for %s → job %s", url, cached_job_id)
         return AuditCreateResponse(
             job_id=uuid.UUID(cached_job_id),
             status=AuditStatus.COMPLETED,
@@ -206,8 +206,8 @@ async def create_audit(
     await db.commit()
 
     # ── 3. Enqueue background pipeline ───────────────────────────────────────
-    background_tasks.add_task(_run_audit, job_id=job_id, url=url, mode=mode)
-    logger.info("Audit job %s queued for %s (mode=%s)", job_id, url, mode)
+    background_tasks.add_task(_run_audit, job_id=job_id, url=url)
+    logger.info("Audit job %s queued for %s", job_id, url)
 
     return AuditCreateResponse(job_id=job_id, status=AuditStatus.PENDING)
 
@@ -359,21 +359,20 @@ async def delete_audit(
 # ---------------------------------------------------------------------------
 
 
-async def _run_audit(job_id: uuid.UUID, url: str, mode: str) -> None:
+async def _run_audit(job_id: uuid.UUID, url: str) -> None:
     """Full three-stage audit pipeline executed as a FastAPI background task.
 
     Stages
     ------
-    1. Crawl  — Playwright extracts page metadata, content, CTAs, screenshot
+    1. Crawl      — Playwright extracts page metadata, content, CTAs, screenshot
     2. Lighthouse — CLI subprocess collects performance + Core Web Vitals
-    3. Analyse — Claude evaluates all data across 6 categories
+    3. Analyse    — Claude evaluates all data across 6 categories
 
-    On success the results are written to PostgreSQL and cached in Redis.
+    On success the results are written to the database and cached in Redis.
     On any unhandled exception the job is marked ``failed`` with the error
     message stored for diagnostics.
     """
     async with AsyncSessionLocal() as db:
-        # Mark job as in-progress
         audit: AuditResult | None = await db.get(AuditResult, job_id)
         if audit is None:
             logger.error("Pipeline: audit %s not found; aborting.", job_id)
@@ -388,7 +387,6 @@ async def _run_audit(job_id: uuid.UUID, url: str, mode: str) -> None:
             logger.info("[%s] Stage 1/3 – crawling %s", job_id, url)
             crawl_data = await crawl_website(url)
 
-            # Pull screenshot bytes out before storing in JSONB
             screenshot_bytes = _extract_screenshot(crawl_data)
             crawl_for_results = {k: v for k, v in crawl_data.items() if k != "screenshot"}
 
@@ -402,18 +400,11 @@ async def _run_audit(job_id: uuid.UUID, url: str, mode: str) -> None:
                 lighthouse_result if not lighthouse_result.get("error") else None
             )
             if lighthouse_result.get("error"):
-                logger.warning(
-                    "[%s] Lighthouse error (non-fatal): %s",
-                    job_id,
-                    lighthouse_result["error"],
-                )
+                logger.warning("[%s] Lighthouse error (non-fatal): %s", job_id, lighthouse_result["error"])
 
             # ── Stage 3: Claude analysis ──────────────────────────────────────
-            logger.info("[%s] Stage 3/3 – running Claude analysis (mode=%s)", job_id, mode)
-            if mode == "roast":
-                analysis = await analyze_website_roast(crawl_data, lighthouse_for_results)
-            else:
-                analysis = await analyze_website(crawl_data, lighthouse_for_results)
+            logger.info("[%s] Stage 3/3 – running Claude analysis", job_id)
+            analysis = await analyze_website(crawl_data, lighthouse_for_results)
 
             # ── Persist results ───────────────────────────────────────────────
             audit.results = {

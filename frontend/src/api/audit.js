@@ -1,10 +1,10 @@
 const BASE = '/api'
 
-export async function submitAudit(url, mode) {
+export async function submitAudit(url) {
   const res = await fetch(`${BASE}/audit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, mode }),
+    body: JSON.stringify({ url }),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))

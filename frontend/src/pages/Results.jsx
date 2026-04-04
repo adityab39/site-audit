@@ -40,13 +40,6 @@ function ScoreLabel({ score }) {
   return <span className={`badge border text-sm font-semibold ${cls}`}>{text}</span>
 }
 
-function ModeBadge({ mode }) {
-  if (!mode) return null
-  return mode === 'roast'
-    ? <span className="badge bg-orange-500/15 text-orange-400 border border-orange-500/30">Roast Mode</span>
-    : <span className="badge bg-violet-500/15 text-violet-400 border border-violet-500/30">Professional</span>
-}
-
 // ─── Lighthouse metrics row ───────────────────────────────────────────────────
 
 function LighthouseMetrics({ lighthouse }) {
@@ -222,7 +215,7 @@ export default function Results() {
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-64 bg-violet-600/5 blur-3xl" />
       </div>
 
-      <NavBar onBack={() => navigate('/')} right={<ModeBadge mode={data.mode} />} />
+      <NavBar onBack={() => navigate('/')} />
 
       <div className="max-w-3xl mx-auto px-4 sm:px-6 pt-10 space-y-10">
 
