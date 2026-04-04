@@ -54,7 +54,7 @@ async def run_lighthouse(url: str) -> dict[str, Any]:
     diagnostics     – render-blocking URLs, large images, unused bytes
     """
     cmd = _build_cmd(url)
-    logger.info("Running Lighthouse: %s", " ".join(cmd))
+    logger.info("Lighthouse command: %s", " ".join(cmd))
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -76,7 +76,6 @@ async def run_lighthouse(url: str) -> dict[str, Any]:
     except asyncio.TimeoutError:
         msg = f"Lighthouse timed out after {TIMEOUT_S:.0f}s for {url}"
         logger.warning(msg)
-        # Best-effort: kill the orphaned subprocess
         try:
             proc.kill()
         except Exception:
@@ -86,15 +85,27 @@ async def run_lighthouse(url: str) -> dict[str, Any]:
         logger.exception("Unexpected error launching Lighthouse: %s", exc)
         return _error_result(url, f"Unexpected error: {exc}")
 
+    # Always surface stderr so problems are visible in the server log
+    stderr_text = stderr.decode(errors="replace").strip()
+    if stderr_text:
+        logger.warning("Lighthouse stderr:\n%s", stderr_text)
+
+    # Log a preview of stdout to confirm what was received
+    stdout_preview = stdout[:200].decode(errors="replace").strip()
+    logger.info(
+        "Lighthouse stdout (first 200 bytes, exit=%d): %s",
+        proc.returncode,
+        stdout_preview or "<empty>",
+    )
+
     # Non-zero exit — Lighthouse could not load the page or crashed
     if proc.returncode != 0:
-        stderr_text = stderr.decode(errors="replace").strip()
         # Still try to parse stdout — Lighthouse sometimes writes JSON even on
         # non-zero exit (e.g. when a category audit fails but others succeed)
         report = _try_parse(stdout)
         if report:
             logger.warning(
-                "Lighthouse exited %d but produced partial JSON; extracting.",
+                "Lighthouse exited %d but produced parseable JSON; extracting.",
                 proc.returncode,
             )
             return _extract(url, report)
@@ -106,9 +117,14 @@ async def run_lighthouse(url: str) -> dict[str, Any]:
     report = _try_parse(stdout)
     if report is None:
         msg = "Lighthouse produced no parseable JSON output"
-        logger.warning("%s for %s", msg, url)
+        logger.warning("%s for %s. stderr: %s", msg, url, stderr_text or "<none>")
         return _error_result(url, msg)
 
+    logger.info(
+        "Lighthouse succeeded for %s (perf=%.0f)",
+        url,
+        (report.get("categories", {}).get("performance", {}).get("score") or 0) * 100,
+    )
     return _extract(url, report)
 
 
@@ -118,17 +134,21 @@ async def run_lighthouse(url: str) -> dict[str, Any]:
 
 
 def _build_cmd(url: str) -> list[str]:
+    """Build the Lighthouse CLI command.
+
+    --chrome-path is intentionally omitted unless LIGHTHOUSE_CHROME_PATH is
+    explicitly set to a non-empty value. Lighthouse auto-detects the system
+    Chrome on macOS and most Linux installs without any flag.
+    """
     cmd: list[str] = [
         settings.lighthouse_binary,
         url,
         "--output=json",
         "--output-path=stdout",
-        '--chrome-flags=--headless --no-sandbox --disable-gpu',
+        "--chrome-flags=--headless --no-sandbox --disable-gpu",
         f"--only-categories={','.join(_CATEGORIES)}",
         "--quiet",
     ]
-    # Only pass --chrome-path when explicitly set; otherwise Lighthouse
-    # auto-detects the system Chrome (works on Mac without any config).
     chrome_path = (settings.lighthouse_chrome_path or "").strip()
     if chrome_path:
         cmd.append(f"--chrome-path={chrome_path}")
