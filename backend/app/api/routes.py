@@ -57,17 +57,17 @@ _RESULT_TTL_S: int = 86_400
 # ---------------------------------------------------------------------------
 
 
-def _url_hash(url: str, mode: str) -> str:
-    """Stable, fixed-length key component for a URL + mode pair."""
-    return hashlib.sha256(f"{url}:{mode}".encode()).hexdigest()
+def _url_hash(url: str) -> str:
+    """Stable, fixed-length key component for a URL."""
+    return hashlib.sha256(url.encode()).hexdigest()
 
 
 def _result_cache_key(job_id: uuid.UUID) -> str:
     return f"audit:result:{job_id}"
 
 
-def _url_cache_key(url: str, mode: str) -> str:
-    return f"audit:url:{_url_hash(url, mode)}"
+def _url_cache_key(url: str) -> str:
+    return f"audit:url:{_url_hash(url)}"
 
 
 def _extract_screenshot(crawl_data: dict[str, Any]) -> bytes | None:
@@ -188,7 +188,7 @@ async def create_audit(
     mode = "professional"
 
     # ── 1. Check URL-level cache ──────────────────────────────────────────────
-    url_key = _url_cache_key(url, mode)
+    url_key = _url_cache_key(url)
     cached_job_id: str | None = await redis.get(url_key)
     if cached_job_id:
         logger.info("Cache hit for %s → job %s", url, cached_job_id)
@@ -344,7 +344,7 @@ async def delete_audit(
         )
 
     # Remove URL→job_id cache so the URL can be re-audited immediately
-    url_key = _url_cache_key(audit.url, audit.mode)
+    url_key = _url_cache_key(audit.url)
     result_key = _result_cache_key(job_id)
     await redis.delete(url_key, result_key)
 
@@ -454,7 +454,7 @@ async def _run_audit(job_id: uuid.UUID, url: str) -> None:
             )
             # Cache URL→job_id mapping (for POST deduplication)
             await redis.setex(
-                _url_cache_key(url, mode),
+                _url_cache_key(url),
                 _RESULT_TTL_S,
                 str(job_id),
             )
