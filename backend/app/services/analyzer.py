@@ -1,9 +1,9 @@
 """Claude-powered website audit agent.
 
 Combines crawl + Lighthouse data with an agentic tool-calling loop:
-Claude decides which supplemental checks to run (robots.txt, SSL,
-broken links, image sizes, sitemap), executes them in parallel, then
-produces a structured JSON audit report.
+Claude decides which supplemental checks to run (image sizes, broken
+links), executes them in parallel, then produces a structured JSON
+audit report.
 
 Public API
 ----------
@@ -16,13 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import socket
-import ssl
 import urllib.error
-import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
 from typing import Any
 
 import anthropic
@@ -79,8 +74,8 @@ experience auditing SaaS, e-commerce, and marketing websites. You have deep expe
 in copywriting, SEO, Core Web Vitals, accessibility, and conversion rate optimisation.
 
 You will receive structured data extracted from a website crawl and optional Lighthouse
-performance metrics. You also have access to tools that let you gather additional
-live data: robots.txt, SSL certificate details, broken links, image sizes, and sitemap.
+performance metrics. You also have access to two tools that let you gather additional
+live data: image sizes and broken links.
 
 Use the tools strategically — call them only when the information would meaningfully
 change a finding. After gathering data (0–3 rounds of tool calls), produce the audit.
@@ -110,7 +105,7 @@ Score each category from 0 to 10 (integers preferred).
    • Canonical URL presence
    • Open Graph tags for social sharing
    • Keyword relevance of visible content
-   • robots.txt and sitemap (use tools to verify)
+   • robots.txt / sitemap presence (infer from crawl data — no tool available)
 
 3. performance — Speed and technical efficiency
    Use Lighthouse data when available. Thresholds:
@@ -143,7 +138,7 @@ Score each category from 0 to 10 (integers preferred).
 5. trust_credibility — Trust signals and credibility
    • Social proof: testimonials, reviews, logos, case studies
    • Contact information visibility
-   • Security: SSL certificate (use check_ssl_details for real expiry data)
+   • Security: SSL certificate (infer from has_ssl flag in crawl data — no tool available)
    • Legal: privacy policy, terms of service links
    • Professional design quality
    • Domain credibility signals
@@ -207,24 +202,6 @@ Respond with ONLY valid JSON — no markdown, no code fences, no explanation tex
 
 _TOOLS: list[dict[str, Any]] = [
     {
-        "name": "fetch_robots_txt",
-        "description": (
-            "Fetch the robots.txt file for the site's domain. "
-            "Use this to check crawl directives, disallow rules, and sitemap references. "
-            "Call this for every site to verify SEO crawlability."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The full website URL (scheme + domain). The tool constructs /robots.txt automatically.",
-                },
-            },
-            "required": ["url"],
-        },
-    },
-    {
         "name": "check_image_sizes",
         "description": (
             "Fetch HTTP headers for up to 10 image URLs and return their file sizes. "
@@ -244,23 +221,6 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "check_ssl_details",
-        "description": (
-            "Check the SSL/TLS certificate for an HTTPS URL: issuer, expiry date, "
-            "days until expiry, and validity. Use this for trust/credibility analysis."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The HTTPS URL to inspect the SSL certificate for.",
-                },
-            },
-            "required": ["url"],
-        },
-    },
-    {
         "name": "check_broken_links",
         "description": (
             "Check a list of URLs and identify which ones return 4xx or 5xx responses. "
@@ -273,28 +233,10 @@ _TOOLS: list[dict[str, Any]] = [
                 "links": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Absolute URLs to check for broken links (max 15).",
+                    "description": "Absolute URLs to check for broken links (max 20).",
                 },
             },
             "required": ["links"],
-        },
-    },
-    {
-        "name": "fetch_sitemap",
-        "description": (
-            "Fetch and parse the sitemap.xml (or sitemap_index.xml) for the site. "
-            "Returns whether it exists, the URL count, and sample URLs. "
-            "Use this for SEO completeness checks."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The full website URL (scheme + domain). The tool tries /sitemap.xml automatically.",
-                },
-            },
-            "required": ["url"],
         },
     },
 ]
@@ -303,12 +245,6 @@ _TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
-
-
-def _make_origin(url: str) -> str:
-    """Return scheme://netloc from a full URL."""
-    parsed = urllib.parse.urlparse(url)
-    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _http_fetch_sync(
@@ -338,43 +274,6 @@ def _http_fetch_sync(
     except Exception:
         # Connection refused, DNS failure, timeout, SSL error, etc.
         return 0, "", {}
-
-
-async def _tool_fetch_robots_txt(url: str) -> dict[str, Any]:
-    origin = _make_origin(url)
-    robots_url = f"{origin}/robots.txt"
-    try:
-        status, body, _ = await asyncio.wait_for(
-            asyncio.to_thread(_http_fetch_sync, robots_url),
-            timeout=10.0,
-        )
-    except (asyncio.TimeoutError, Exception) as exc:
-        return {
-            "url": robots_url,
-            "status": "check_failed",
-            "error": "Connection timed out or failed — could not verify robots.txt",
-        }
-
-    if status == 200 and body:
-        lines = [ln for ln in body.strip().splitlines() if ln.strip()]
-        disallow_count = sum(1 for ln in lines if ln.lower().startswith("disallow"))
-        return {
-            "url": robots_url,
-            "status": "found",
-            "total_lines": len(lines),
-            "disallow_rules": disallow_count,
-            "preview": "\n".join(lines[:30]),
-        }
-    if status == 404:
-        return {"url": robots_url, "status": "not_found"}
-    if status == 0:
-        # Connection failure, timeout, or SSL error — do NOT report as missing
-        return {
-            "url": robots_url,
-            "status": "check_failed",
-            "error": "Could not connect to server — robots.txt status unknown",
-        }
-    return {"url": robots_url, "status": "not_found", "http_status": status}
 
 
 async def _tool_check_image_sizes(image_urls: list[str]) -> dict[str, Any]:
@@ -408,65 +307,6 @@ async def _tool_check_image_sizes(image_urls: list[str]) -> dict[str, Any]:
         "large_images_over_100kb": len(large),
         "results": clean,
     }
-
-
-def _ssl_details_sync(hostname: str, port: int = 443) -> dict[str, Any]:
-    ctx = ssl.create_default_context()
-    try:
-        with socket.create_connection((hostname, port), timeout=8) as sock:
-            with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert = ssock.getpeercert()
-                not_after: str = cert.get("notAfter", "")
-                issuer_fields  = dict(x[0] for x in cert.get("issuer", []))
-                subject_fields = dict(x[0] for x in cert.get("subject", []))
-
-                days_left: int | None = None
-                if not_after:
-                    try:
-                        # notAfter format: "Mar  1 00:00:00 2026 GMT" or "Mar 10 …"
-                        # Remove " GMT" suffix before parsing to avoid %Z platform issues;
-                        # collapse any double-space (single-digit day padding).
-                        clean = not_after.replace(" GMT", "").replace("  ", " ").strip()
-                        expiry_dt = datetime.strptime(clean, "%b %d %H:%M:%S %Y").replace(
-                            tzinfo=timezone.utc
-                        )
-                        days_left = (expiry_dt - datetime.now(timezone.utc)).days
-                    except ValueError:
-                        pass  # leave days_left as None if parsing fails
-
-                return {
-                    "status": "verified",
-                    "issuer": issuer_fields.get("organizationName", "Unknown"),
-                    "common_name": subject_fields.get("commonName", hostname),
-                    "expires": not_after,
-                    "days_until_expiry": days_left,
-                    "expiry_warning": days_left is not None and days_left < 30,
-                }
-    except ssl.SSLCertVerificationError as exc:
-        return {"status": "invalid", "error": f"Certificate verification failed: {exc}"}
-    except Exception as exc:
-        return {
-            "status": "check_failed",
-            "error": f"Could not connect or read certificate: {exc}",
-        }
-
-
-async def _tool_check_ssl_details(url: str) -> dict[str, Any]:
-    if not url.startswith("https://"):
-        return {"status": "not_applicable", "error": "URL does not use HTTPS"}
-    parsed = urllib.parse.urlparse(url)
-    hostname = parsed.hostname or ""
-    port = parsed.port or 443
-    if not hostname:
-        return {"status": "check_failed", "error": "Could not parse hostname from URL"}
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(_ssl_details_sync, hostname, port),
-            timeout=12.0,
-        )
-        return result
-    except asyncio.TimeoutError:
-        return {"status": "check_failed", "error": "SSL check timed out"}
 
 
 async def _tool_check_broken_links(links: list[str]) -> dict[str, Any]:
@@ -505,51 +345,6 @@ async def _tool_check_broken_links(links: list[str]) -> dict[str, Any]:
     }
 
 
-def _sitemap_fetch_sync(sitemap_url: str) -> dict[str, Any]:
-    status, body, _ = _http_fetch_sync(sitemap_url, max_bytes=200_000)
-    if status != 200 or not body:
-        return {"found": False, "url": sitemap_url, "status_code": status}
-    try:
-        root = ET.fromstring(body)
-        # Normalise namespace-prefixed tags
-        tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
-        locs = [el.text for el in root.iter() if el.tag.split("}")[-1] == "loc" and el.text]
-        if tag == "sitemapindex":
-            return {
-                "found": True,
-                "url": sitemap_url,
-                "type": "sitemap_index",
-                "sitemap_count": len(locs),
-                "sample_sitemaps": locs[:5],
-            }
-        return {
-            "found": True,
-            "url": sitemap_url,
-            "type": "urlset",
-            "url_count": len(locs),
-            "sample_urls": locs[:10],
-        }
-    except ET.ParseError:
-        return {
-            "found": True,
-            "url": sitemap_url,
-            "parse_error": True,
-            "preview": body[:200],
-        }
-
-
-async def _tool_fetch_sitemap(url: str) -> dict[str, Any]:
-    origin = _make_origin(url)
-    for path in ("/sitemap.xml", "/sitemap_index.xml", "/sitemap/sitemap.xml"):
-        result = await asyncio.to_thread(_sitemap_fetch_sync, f"{origin}{path}")
-        if result.get("found"):
-            return result
-    return {
-        "found": False,
-        "tried": [f"{origin}/sitemap.xml", f"{origin}/sitemap_index.xml"],
-    }
-
-
 # ---------------------------------------------------------------------------
 # Tool dispatcher
 # ---------------------------------------------------------------------------
@@ -562,16 +357,10 @@ async def _execute_tool(name: str, tool_input: dict[str, Any], crawl_url: str) -
     so Claude knows the check didn't succeed and must NOT invent findings.
     """
     try:
-        if name == "fetch_robots_txt":
-            return await _tool_fetch_robots_txt(tool_input.get("url", crawl_url))
         if name == "check_image_sizes":
             return await _tool_check_image_sizes(tool_input.get("image_urls", []))
-        if name == "check_ssl_details":
-            return await _tool_check_ssl_details(tool_input.get("url", crawl_url))
         if name == "check_broken_links":
             return await _tool_check_broken_links(tool_input.get("links", []))
-        if name == "fetch_sitemap":
-            return await _tool_fetch_sitemap(tool_input.get("url", crawl_url))
         return {"check_failed": True, "error": f"Unknown tool: {name}"}
     except Exception as exc:
         logger.warning("[Agent] Tool '%s' raised an exception: %s", name, exc)
@@ -824,11 +613,11 @@ def _log_summary(result: Any) -> str:
     if "broken_count" in result:
         return f"{result.get('checked', 0)} links checked, {result['broken_count']} broken"
     if "images_checked" in result:
-        return f"{result['images_checked']} images, {result.get('total_size_kb', 0)} KB total, {result.get('large_images_over_100kb', 0)} large"
-    if "found" in result:
-        return f"found={result['found']}" + (f", url_count={result.get('url_count')}" if result.get("url_count") else "")
-    if "valid" in result:
-        return f"valid={result['valid']}, expires={result.get('expires', 'unknown')}, days_left={result.get('days_until_expiry')}"
+        return (
+            f"{result['images_checked']} images, "
+            f"{result.get('total_size_kb', 0)} KB total, "
+            f"{result.get('large_images_over_100kb', 0)} large"
+        )
     return str(result)[:120]
 
 
