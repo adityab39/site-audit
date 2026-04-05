@@ -40,8 +40,6 @@ htmlcov/
 *.log
 logs/
 
-# Docker
-.dockerignore
 
 # Playwright
 playwright-report/

@@ -1,0 +1,18 @@
+# Dependencies (rebuilt inside the image)
+node_modules/
+
+# Build output (rebuilt inside the image)
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# Environment files
+.env
+.env.local
+.env.*.local
