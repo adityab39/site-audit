@@ -187,16 +187,19 @@ async def create_audit(
     url = str(payload.url)
     mode = "professional"
 
-    # ── 1. Check URL-level cache ──────────────────────────────────────────────
+    # ── 1. Check URL-level cache (skipped when force=true) ────────────────────
     url_key = _url_cache_key(url)
-    cached_job_id: str | None = await redis.get(url_key)
-    if cached_job_id:
-        logger.info("Cache hit for %s → job %s", url, cached_job_id)
-        return AuditCreateResponse(
-            job_id=uuid.UUID(cached_job_id),
-            status=AuditStatus.COMPLETED,
-            cached=True,
-        )
+    if payload.force:
+        logger.info("Force re-analysis requested for %s — skipping cache", url)
+    else:
+        cached_job_id: str | None = await redis.get(url_key)
+        if cached_job_id:
+            logger.info("Cache hit for %s → job %s", url, cached_job_id)
+            return AuditCreateResponse(
+                job_id=uuid.UUID(cached_job_id),
+                status=AuditStatus.COMPLETED,
+                cached=True,
+            )
 
     # ── 2. Persist a new job row ──────────────────────────────────────────────
     audit = AuditResult(url=url, mode=mode, status=AuditStatus.PENDING)

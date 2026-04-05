@@ -20,6 +20,7 @@ class AuditRequest(BaseModel):
     """Body accepted by ``POST /api/audit``."""
 
     url: HttpUrl
+    force: bool = False  # if True, bypass Redis cache and run a fresh analysis
 
     @field_validator("url")
     @classmethod

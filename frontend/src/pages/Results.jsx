@@ -159,6 +159,55 @@ function ShareButton() {
   )
 }
 
+// ─── Re-analyze button ────────────────────────────────────────────────────────
+
+function ReanalyzeButton({ url }) {
+  const navigate = useNavigate()
+  const [loading, setLoading] = useState(false)
+
+  const handleReanalyze = async () => {
+    if (!url || loading) return
+    setLoading(true)
+    try {
+      const res = await fetch('/api/audit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, force: true }),
+      })
+      if (!res.ok) throw new Error('Request failed')
+      const { job_id } = await res.json()
+      navigate(`/audit/${job_id}`)
+    } catch {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <button
+      onClick={handleReanalyze}
+      disabled={loading}
+      className="flex items-center gap-2 border border-zinc-700 hover:border-zinc-600 text-zinc-400 hover:text-zinc-200 font-medium px-5 py-2.5 rounded-xl transition-all text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+    >
+      {loading ? (
+        <>
+          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+          </svg>
+          Starting...
+        </>
+      ) : (
+        <>
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          Re-analyze
+        </>
+      )}
+    </button>
+  )
+}
+
 // ─── Shared nav bar ───────────────────────────────────────────────────────────
 
 function NavBar({ onBack }) {
@@ -421,6 +470,7 @@ export default function Results() {
             </span>
             <div className="flex items-center gap-3 flex-wrap justify-center">
               <ShareButton />
+              <ReanalyzeButton url={data.url} />
               <Link
                 to="/"
                 className="bg-violet-600 hover:bg-violet-500 text-white font-semibold px-6 py-2.5 rounded-xl transition-colors text-sm flex items-center gap-2"
