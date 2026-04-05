@@ -1,7 +1,9 @@
-"""Claude-powered website audit analyzer.
+"""Claude-powered website audit agent.
 
-Sends crawl + Lighthouse data to the Anthropic API and returns a rich,
-structured JSON audit report with per-category scores and actionable findings.
+Combines crawl + Lighthouse data with an agentic tool-calling loop:
+Claude decides which supplemental checks to run (robots.txt, SSL,
+broken links, image sizes, sitemap), executes them in parallel, then
+produces a structured JSON audit report.
 
 Public API
 ----------
@@ -14,6 +16,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from typing import Any
 
 import anthropic
@@ -24,11 +33,14 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # ---------------------------------------------------------------------------
-# Retry configuration
+# Retry / agent constants
 # ---------------------------------------------------------------------------
 
-_MAX_API_RETRIES: int = 2          # total extra attempts after the first
-_RETRY_DELAY_S: float = 1.5        # base delay; multiplied by attempt number
+_MAX_API_RETRIES: int = 2
+_RETRY_DELAY_S: float = 1.5
+_MAX_TOOL_ROUNDS: int = 3      # how many tool-calling rounds before forcing final answer
+_TOOL_HTTP_TIMEOUT: float = 10.0  # per-request timeout for tool HTTP calls
+
 _RETRYABLE_ERRORS = (
     anthropic.APIConnectionError,
     anthropic.RateLimitError,
@@ -49,12 +61,12 @@ CATEGORY_KEYS: tuple[str, ...] = (
 )
 
 CATEGORY_LABELS: dict[str, str] = {
-    "copy_messaging": "Copy & Messaging",
-    "seo_health": "SEO Health",
-    "performance": "Performance",
-    "design_ux": "Design & UX",
+    "copy_messaging":    "Copy & Messaging",
+    "seo_health":        "SEO Health",
+    "performance":       "Performance",
+    "design_ux":         "Design & UX",
     "trust_credibility": "Trust & Credibility",
-    "accessibility": "Accessibility",
+    "accessibility":     "Accessibility",
 }
 
 # ---------------------------------------------------------------------------
@@ -67,7 +79,11 @@ experience auditing SaaS, e-commerce, and marketing websites. You have deep expe
 in copywriting, SEO, Core Web Vitals, accessibility, and conversion rate optimisation.
 
 You will receive structured data extracted from a website crawl and optional Lighthouse
-performance metrics. Analyse this data and produce a comprehensive audit report.
+performance metrics. You also have access to tools that let you gather additional
+live data: robots.txt, SSL certificate details, broken links, image sizes, and sitemap.
+
+Use the tools strategically — call them only when the information would meaningfully
+change a finding. After gathering data (0–3 rounds of tool calls), produce the audit.
 
 ━━━ SCORING ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Score each category from 0 to 10 (integers preferred).
@@ -94,6 +110,7 @@ Score each category from 0 to 10 (integers preferred).
    • Canonical URL presence
    • Open Graph tags for social sharing
    • Keyword relevance of visible content
+   • robots.txt and sitemap (use tools to verify)
 
 3. performance — Speed and technical efficiency
    Use Lighthouse data when available. Thresholds:
@@ -102,15 +119,14 @@ Score each category from 0 to 10 (integers preferred).
    • CLS: < 0.1 Good, 0.1–0.25 Needs Work, > 0.25 Poor
    • FCP: < 1.8 s Good, 1.8–3 s Needs Work, > 3 s Poor
    Also evaluate: page size, request count, render-blocking resources, unused JS/CSS.
+   Use check_image_sizes to find oversized images.
 
    IMPORTANT — Lighthouse has FOUR separate scores:
      • Lighthouse Performance Score (0-100) — speed; used for this "performance" category
      • Lighthouse Accessibility Score (0-100) — used for the "accessibility" category
      • Lighthouse SEO Score (0-100) — one signal in "seo_health"
      • Lighthouse Best Practices Score (0-100) — one signal in "trust_credibility"
-   NEVER write "Lighthouse score" without specifying which category (Performance,
-   Accessibility, SEO, or Best Practices). Always use the full label, e.g.
-   "Lighthouse Performance Score: 55/100" or "Lighthouse SEO Score: 92/100".
+   NEVER write "Lighthouse score" without specifying which category.
 
 4. design_ux — Visual design and user experience
    • CTA visibility and placement above the fold
@@ -121,9 +137,9 @@ Score each category from 0 to 10 (integers preferred).
    • Visual hierarchy guiding the eye toward key actions
 
 5. trust_credibility — Trust signals and credibility
-   • Social proof: testimonials, reviews, logos, case studies in content/headings
+   • Social proof: testimonials, reviews, logos, case studies
    • Contact information visibility
-   • Security: SSL certificate, trust badge signals
+   • Security: SSL certificate (use check_ssl_details for real expiry data)
    • Legal: privacy policy, terms of service links
    • Professional design quality
    • Domain credibility signals
@@ -177,6 +193,323 @@ Respond with ONLY valid JSON — no markdown, no code fences, no explanation tex
 
 
 # ---------------------------------------------------------------------------
+# Tool schemas (sent to Claude as available capabilities)
+# ---------------------------------------------------------------------------
+
+_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "fetch_robots_txt",
+        "description": (
+            "Fetch the robots.txt file for the site's domain. "
+            "Use this to check crawl directives, disallow rules, and sitemap references. "
+            "Call this for every site to verify SEO crawlability."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The full website URL (scheme + domain). The tool constructs /robots.txt automatically.",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "check_image_sizes",
+        "description": (
+            "Fetch HTTP headers for up to 10 image URLs and return their file sizes. "
+            "Use this to identify oversized images that hurt performance. "
+            "Pass image src URLs from the crawl data."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "image_urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute image URLs to check (max 10).",
+                },
+            },
+            "required": ["image_urls"],
+        },
+    },
+    {
+        "name": "check_ssl_details",
+        "description": (
+            "Check the SSL/TLS certificate for an HTTPS URL: issuer, expiry date, "
+            "days until expiry, and validity. Use this for trust/credibility analysis."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The HTTPS URL to inspect the SSL certificate for.",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "check_broken_links",
+        "description": (
+            "Check a list of URLs and identify which ones return 4xx or 5xx responses. "
+            "Use this on a sample of internal or external links to find dead links "
+            "that harm SEO and user experience."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "links": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute URLs to check for broken links (max 15).",
+                },
+            },
+            "required": ["links"],
+        },
+    },
+    {
+        "name": "fetch_sitemap",
+        "description": (
+            "Fetch and parse the sitemap.xml (or sitemap_index.xml) for the site. "
+            "Returns whether it exists, the URL count, and sample URLs. "
+            "Use this for SEO completeness checks."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The full website URL (scheme + domain). The tool tries /sitemap.xml automatically.",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
+
+
+def _make_origin(url: str) -> str:
+    """Return scheme://netloc from a full URL."""
+    parsed = urllib.parse.urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _http_fetch_sync(
+    url: str,
+    method: str = "GET",
+    timeout: float = _TOOL_HTTP_TIMEOUT,
+    max_bytes: int = 50_000,
+) -> tuple[int, str, dict[str, str]]:
+    """Blocking HTTP fetch. Returns (status_code, body, headers)."""
+    try:
+        req = urllib.request.Request(
+            url,
+            method=method,
+            headers={"User-Agent": "SiteAuditBot/1.0"},
+        )
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+            body = resp.read(max_bytes).decode(errors="replace") if method == "GET" else ""
+            return resp.status, body, dict(resp.headers)
+    except urllib.error.HTTPError as exc:
+        return exc.code, "", {}
+    except Exception:
+        return 0, "", {}
+
+
+async def _tool_fetch_robots_txt(url: str) -> dict[str, Any]:
+    origin = _make_origin(url)
+    robots_url = f"{origin}/robots.txt"
+    status, body, _ = await asyncio.to_thread(_http_fetch_sync, robots_url)
+    if status == 200 and body:
+        lines = [l for l in body.strip().splitlines() if l.strip()]
+        disallow_count = sum(1 for l in lines if l.lower().startswith("disallow"))
+        return {
+            "url": robots_url,
+            "found": True,
+            "total_lines": len(lines),
+            "disallow_rules": disallow_count,
+            "preview": "\n".join(lines[:30]),
+        }
+    return {"url": robots_url, "found": False, "status_code": status}
+
+
+async def _tool_check_image_sizes(image_urls: list[str]) -> dict[str, Any]:
+    urls = [u for u in image_urls if u and u.startswith("http")][:10]
+    if not urls:
+        return {"error": "No valid absolute image URLs provided"}
+
+    async def _one(img_url: str) -> dict[str, Any]:
+        status, _, headers = await asyncio.to_thread(
+            _http_fetch_sync, img_url, "HEAD"
+        )
+        raw_size = headers.get("Content-Length") or headers.get("content-length")
+        size_bytes = int(raw_size) if raw_size and raw_size.isdigit() else None
+        return {
+            "url": img_url[:100],
+            "status": status,
+            "size_bytes": size_bytes,
+            "size_kb": round(size_bytes / 1024, 1) if size_bytes else None,
+        }
+
+    results: list[Any] = await asyncio.gather(*[_one(u) for u in urls], return_exceptions=True)
+    clean = [
+        r if isinstance(r, dict) else {"url": urls[i], "error": str(r)}
+        for i, r in enumerate(results)
+    ]
+    total_kb = sum((r.get("size_kb") or 0) for r in clean if isinstance(r, dict))
+    large = [r for r in clean if isinstance(r, dict) and (r.get("size_kb") or 0) > 100]
+    return {
+        "images_checked": len(clean),
+        "total_size_kb": round(total_kb, 1),
+        "large_images_over_100kb": len(large),
+        "results": clean,
+    }
+
+
+def _ssl_details_sync(hostname: str, port: int = 443) -> dict[str, Any]:
+    ctx = ssl.create_default_context()
+    try:
+        with socket.create_connection((hostname, port), timeout=8) as sock:
+            with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+                cert = ssock.getpeercert()
+                not_after = cert.get("notAfter", "")
+                issuer_fields = dict(x[0] for x in cert.get("issuer", []))
+                subject_fields = dict(x[0] for x in cert.get("subject", []))
+                expiry_dt: datetime | None = None
+                days_left: int | None = None
+                if not_after:
+                    expiry_dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z").replace(
+                        tzinfo=timezone.utc
+                    )
+                    days_left = (expiry_dt - datetime.now(timezone.utc)).days
+                return {
+                    "valid": True,
+                    "issuer": issuer_fields.get("organizationName", "Unknown"),
+                    "common_name": subject_fields.get("commonName", hostname),
+                    "expires": not_after,
+                    "days_until_expiry": days_left,
+                    "expiry_warning": days_left is not None and days_left < 30,
+                }
+    except ssl.SSLCertVerificationError as exc:
+        return {"valid": False, "error": f"Certificate verification failed: {exc}"}
+    except Exception as exc:
+        return {"valid": False, "error": str(exc)}
+
+
+async def _tool_check_ssl_details(url: str) -> dict[str, Any]:
+    if not url.startswith("https://"):
+        return {"valid": False, "error": "URL does not use HTTPS"}
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname or ""
+    port = parsed.port or 443
+    if not hostname:
+        return {"valid": False, "error": "Could not parse hostname from URL"}
+    return await asyncio.to_thread(_ssl_details_sync, hostname, port)
+
+
+async def _tool_check_broken_links(links: list[str]) -> dict[str, Any]:
+    urls = [u for u in links if u and u.startswith("http")][:15]
+    if not urls:
+        return {"error": "No valid absolute URLs provided"}
+
+    async def _one(link: str) -> dict[str, Any]:
+        status, _, _ = await asyncio.to_thread(_http_fetch_sync, link, "HEAD")
+        broken = status == 0 or 400 <= status < 600
+        return {"url": link[:120], "status": status, "broken": broken}
+
+    results: list[Any] = await asyncio.gather(*[_one(u) for u in urls], return_exceptions=True)
+    clean = [
+        r if isinstance(r, dict) else {"url": urls[i], "status": 0, "broken": True}
+        for i, r in enumerate(results)
+    ]
+    broken = [r for r in clean if r.get("broken")]
+    return {
+        "checked": len(clean),
+        "broken_count": len(broken),
+        "broken_links": broken,
+        "healthy_count": len(clean) - len(broken),
+    }
+
+
+def _sitemap_fetch_sync(sitemap_url: str) -> dict[str, Any]:
+    status, body, _ = _http_fetch_sync(sitemap_url, max_bytes=200_000)
+    if status != 200 or not body:
+        return {"found": False, "url": sitemap_url, "status_code": status}
+    try:
+        root = ET.fromstring(body)
+        # Normalise namespace-prefixed tags
+        tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
+        locs = [el.text for el in root.iter() if el.tag.split("}")[-1] == "loc" and el.text]
+        if tag == "sitemapindex":
+            return {
+                "found": True,
+                "url": sitemap_url,
+                "type": "sitemap_index",
+                "sitemap_count": len(locs),
+                "sample_sitemaps": locs[:5],
+            }
+        return {
+            "found": True,
+            "url": sitemap_url,
+            "type": "urlset",
+            "url_count": len(locs),
+            "sample_urls": locs[:10],
+        }
+    except ET.ParseError:
+        return {
+            "found": True,
+            "url": sitemap_url,
+            "parse_error": True,
+            "preview": body[:200],
+        }
+
+
+async def _tool_fetch_sitemap(url: str) -> dict[str, Any]:
+    origin = _make_origin(url)
+    for path in ("/sitemap.xml", "/sitemap_index.xml", "/sitemap/sitemap.xml"):
+        result = await asyncio.to_thread(_sitemap_fetch_sync, f"{origin}{path}")
+        if result.get("found"):
+            return result
+    return {
+        "found": False,
+        "tried": [f"{origin}/sitemap.xml", f"{origin}/sitemap_index.xml"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool dispatcher
+# ---------------------------------------------------------------------------
+
+
+async def _execute_tool(name: str, tool_input: dict[str, Any], crawl_url: str) -> dict[str, Any]:
+    """Route a tool call from Claude to the correct async implementation."""
+    try:
+        if name == "fetch_robots_txt":
+            return await _tool_fetch_robots_txt(tool_input.get("url", crawl_url))
+        if name == "check_image_sizes":
+            return await _tool_check_image_sizes(tool_input.get("image_urls", []))
+        if name == "check_ssl_details":
+            return await _tool_check_ssl_details(tool_input.get("url", crawl_url))
+        if name == "check_broken_links":
+            return await _tool_check_broken_links(tool_input.get("links", []))
+        if name == "fetch_sitemap":
+            return await _tool_fetch_sitemap(tool_input.get("url", crawl_url))
+        return {"error": f"Unknown tool: {name}"}
+    except Exception as exc:
+        logger.warning("[Agent] Tool '%s' raised an exception: %s", name, exc)
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
 
@@ -185,15 +518,14 @@ async def analyze_website(
     crawl_data: dict[str, Any],
     lighthouse_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run a professional audit of the website.
+    """Run an agentic audit of the website.
 
     Parameters
     ----------
     crawl_data:
         Output of :func:`~app.services.crawler.crawl_website`.
     lighthouse_data:
-        Output of :func:`~app.services.lighthouse.run_lighthouse`, or ``None``
-        if Lighthouse was skipped / failed.
+        Output of :func:`~app.services.lighthouse.run_lighthouse`, or ``None``.
 
     Returns
     -------
@@ -214,7 +546,7 @@ async def run_analysis(
 
 
 # ---------------------------------------------------------------------------
-# Internal service class
+# Agent service
 # ---------------------------------------------------------------------------
 
 
@@ -227,25 +559,122 @@ class _AnalyzerService:
         crawl_data: dict[str, Any],
         lighthouse_data: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Build the user message, call Claude, parse and return results."""
+        crawl_url: str = crawl_data.get("url", "")
         user_message = _build_audit_context(crawl_data, lighthouse_data)
 
-        raw_text = await self._call_claude(user_message)
+        # Run the agent loop
+        raw_text = await self._agent_loop(user_message, crawl_url)
         result = _try_parse_json(raw_text)
 
         if result is None:
-            logger.warning("Claude returned invalid JSON on first attempt; retrying.")
-            raw_text = await self._call_claude(user_message)
+            logger.warning("[Agent] Could not parse final JSON — retrying with simple call")
+            raw_text = await self._simple_call(user_message)
             result = _try_parse_json(raw_text)
 
         if result is None:
-            logger.error("Claude returned unparseable JSON after retry; using fallback.")
+            logger.error("[Agent] All parse attempts exhausted — using fallback result")
             return _fallback_result()
 
         return result
 
-    async def _call_claude(self, user: str) -> str:
-        """Call the Claude API with exponential-backoff retry on transient errors."""
+    # ── Agent loop ────────────────────────────────────────────────────────────
+
+    async def _agent_loop(self, initial_message: str, crawl_url: str) -> str:
+        """Agentic loop: Claude analyses → calls tools → gets results → repeats.
+
+        The loop runs for at most ``_MAX_TOOL_ROUNDS`` rounds of tool calling.
+        After that we stop providing tools so Claude is forced to produce the
+        final JSON report.
+        """
+        messages: list[dict[str, Any]] = [{"role": "user", "content": initial_message}]
+
+        for round_num in range(1, _MAX_TOOL_ROUNDS + 2):  # +2: rounds 1…N plus final
+            allow_tools = round_num <= _MAX_TOOL_ROUNDS
+            response = await self._api_call(
+                messages,
+                tools=_TOOLS if allow_tools else [],
+            )
+
+            tool_uses = [b for b in response.content if b.type == "tool_use"]
+            text_blocks = [b for b in response.content if b.type == "text"]
+
+            if not tool_uses or response.stop_reason == "end_turn":
+                # Claude produced the final report
+                logger.info(
+                    "[Agent] Final report received after %d tool round(s)",
+                    round_num - 1,
+                )
+                return text_blocks[0].text if text_blocks else ""
+
+            # ── Claude wants to call tools ────────────────────────────────────
+            tool_names = [t.name for t in tool_uses]
+            logger.info(
+                "[Agent] Round %d/%d — Claude called %d tool(s): %s",
+                round_num, _MAX_TOOL_ROUNDS, len(tool_uses), tool_names,
+            )
+
+            # Execute all tool calls concurrently
+            tool_results: list[Any] = await asyncio.gather(
+                *[_execute_tool(t.name, t.input, crawl_url) for t in tool_uses],
+                return_exceptions=True,
+            )
+
+            # Log a brief summary of each result
+            for tool, result in zip(tool_uses, tool_results):
+                logger.info(
+                    "[Agent] Tool '%s' → %s",
+                    tool.name,
+                    _log_summary(result),
+                )
+
+            # Build tool_result content blocks for the next user message.
+            # If this was the last permitted round, attach the "produce final
+            # report" instruction in the same user turn so we don't send two
+            # consecutive user messages.
+            tool_result_content: list[dict[str, Any]] = []
+            for tool, result in zip(tool_uses, tool_results):
+                if isinstance(result, Exception):
+                    result = {"error": str(result)}
+                tool_result_content.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool.id,
+                        "content": json.dumps(result, default=str),
+                    }
+                )
+
+            if round_num == _MAX_TOOL_ROUNDS:
+                logger.warning(
+                    "[Agent] Maximum tool rounds (%d) reached — appending final-report instruction",
+                    _MAX_TOOL_ROUNDS,
+                )
+                tool_result_content.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            "You have now gathered all the information you need. "
+                            "Produce the final JSON audit report immediately."
+                        ),
+                    }
+                )
+
+            # Append assistant turn (with tool_use blocks) and user turn (with results)
+            messages.append(
+                {"role": "assistant", "content": _serialize_content(response.content)}
+            )
+            messages.append({"role": "user", "content": tool_result_content})
+
+        # Should be unreachable, but guard just in case
+        return ""
+
+    # ── API call with retry ───────────────────────────────────────────────────
+
+    async def _api_call(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> Any:
+        """Call the Claude Messages API with exponential-backoff retry."""
         last_exc: Exception | None = None
 
         for attempt in range(_MAX_API_RETRIES + 1):
@@ -255,21 +684,21 @@ class _AnalyzerService:
                 await asyncio.sleep(delay)
 
             try:
-                message = await self._client.messages.create(
-                    model=settings.claude_model,
-                    max_tokens=settings.claude_max_tokens,
-                    system=_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": user}],
-                )
-                return message.content[0].text
+                kwargs: dict[str, Any] = {
+                    "model": settings.claude_model,
+                    "max_tokens": settings.claude_max_tokens,
+                    "system": _SYSTEM_PROMPT,
+                    "messages": messages,
+                }
+                if tools:
+                    kwargs["tools"] = tools
+                return await self._client.messages.create(**kwargs)
 
             except _RETRYABLE_ERRORS as exc:
                 last_exc = exc
                 logger.warning(
                     "Retryable Claude API error (attempt %d/%d): %s",
-                    attempt + 1,
-                    _MAX_API_RETRIES + 1,
-                    exc,
+                    attempt + 1, _MAX_API_RETRIES + 1, exc,
                 )
 
             except anthropic.APIError as exc:
@@ -279,9 +708,60 @@ class _AnalyzerService:
         assert last_exc is not None
         raise last_exc
 
+    async def _simple_call(self, user_message: str) -> str:
+        """Fallback: single call without tools (for JSON parse retry)."""
+        response = await self._api_call(
+            [{"role": "user", "content": user_message}],
+            tools=[],
+        )
+        text_blocks = [b for b in response.content if b.type == "text"]
+        return text_blocks[0].text if text_blocks else ""
+
 
 # ---------------------------------------------------------------------------
-# Context builder — shapes raw service data into a focused Claude prompt
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _serialize_content(content: Any) -> list[dict[str, Any]]:
+    """Convert Anthropic SDK content blocks to plain dicts for message history."""
+    result: list[dict[str, Any]] = []
+    for block in content:
+        if block.type == "text":
+            result.append({"type": "text", "text": block.text})
+        elif block.type == "tool_use":
+            result.append(
+                {
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                }
+            )
+    return result
+
+
+def _log_summary(result: Any) -> str:
+    """One-line log-friendly summary of a tool result."""
+    if isinstance(result, Exception):
+        return f"exception: {result}"
+    if not isinstance(result, dict):
+        return repr(result)[:120]
+    if "error" in result:
+        return f"error — {result['error']}"
+    if "broken_count" in result:
+        return f"{result.get('checked', 0)} links checked, {result['broken_count']} broken"
+    if "images_checked" in result:
+        return f"{result['images_checked']} images, {result.get('total_size_kb', 0)} KB total, {result.get('large_images_over_100kb', 0)} large"
+    if "found" in result:
+        return f"found={result['found']}" + (f", url_count={result.get('url_count')}" if result.get("url_count") else "")
+    if "valid" in result:
+        return f"valid={result['valid']}, expires={result.get('expires', 'unknown')}, days_left={result.get('days_until_expiry')}"
+    return str(result)[:120]
+
+
+# ---------------------------------------------------------------------------
+# Context builder
 # ---------------------------------------------------------------------------
 
 
@@ -289,16 +769,12 @@ def _build_audit_context(
     crawl_data: dict[str, Any],
     lighthouse_data: dict[str, Any] | None,
 ) -> str:
-    """Transform raw crawler + lighthouse dicts into a focused audit context.
-
-    Strips binary data (screenshots), truncates large lists, and adds
-    computed summaries so the prompt stays compact and signal-rich.
-    """
-    meta = crawl_data.get("metadata", {})
-    content = crawl_data.get("content", {})
+    """Transform raw crawler + lighthouse dicts into a focused audit context."""
+    meta      = crawl_data.get("metadata", {})
+    content   = crawl_data.get("content",  {})
     technical = crawl_data.get("technical", {})
-    design = crawl_data.get("design", {})
-    cta = crawl_data.get("cta", {})
+    design    = crawl_data.get("design",   {})
+    cta       = crawl_data.get("cta",      {})
 
     all_links: list[dict] = content.get("links", [])
     external_links = [l for l in all_links if l.get("is_external")]
@@ -324,48 +800,53 @@ def _build_audit_context(
             {"src": i.get("src", "")[:80], "alt": i.get("alt", "")}
             for i in all_images[:6]
         ],
+        # Pass first 10 src URLs so Claude can pass them to check_image_sizes
+        "image_urls_for_size_check": [
+            i.get("src", "") for i in all_images if i.get("src", "").startswith("http")
+        ][:10],
     }
 
     crawl_context: dict[str, Any] = {
         "url": crawl_data.get("url"),
         "status_code": crawl_data.get("status_code"),
+        "crawl_partial": crawl_data.get("partial", False),
         "crawl_error": crawl_data.get("error"),
         "metadata": {
-            "title": meta.get("title"),
-            "title_length": len(meta.get("title") or ""),
-            "meta_description": meta.get("meta_description"),
-            "meta_description_length": len(meta.get("meta_description") or ""),
-            "meta_keywords": meta.get("meta_keywords"),
-            "og_tags": meta.get("og_tags", {}),
-            "canonical_url": meta.get("canonical_url"),
-            "has_favicon": bool(meta.get("favicon_url")),
+            "title":                    meta.get("title"),
+            "title_length":             len(meta.get("title") or ""),
+            "meta_description":         meta.get("meta_description"),
+            "meta_description_length":  len(meta.get("meta_description") or ""),
+            "meta_keywords":            meta.get("meta_keywords"),
+            "og_tags":                  meta.get("og_tags", {}),
+            "canonical_url":            meta.get("canonical_url"),
+            "has_favicon":              bool(meta.get("favicon_url")),
         },
         "content": {
-            "h1_tags": content.get("h1_tags", []),
-            "h2_tags": content.get("h2_tags", [])[:10],
-            "h3_tags": content.get("h3_tags", [])[:10],
+            "h1_tags":          content.get("h1_tags", []),
+            "h2_tags":          content.get("h2_tags", [])[:10],
+            "h3_tags":          content.get("h3_tags", [])[:10],
             "heading_hierarchy": content.get("heading_hierarchy", [])[:20],
-            "word_count": content.get("word_count"),
-            "content_sample": content.get("paragraphs", [])[:4],
-            "links": link_summary,
-            "images": image_summary,
+            "word_count":       content.get("word_count"),
+            "content_sample":   content.get("paragraphs", [])[:4],
+            "links":            link_summary,
+            "images":           image_summary,
         },
         "technical": {
-            "has_ssl": technical.get("has_ssl"),
-            "language": technical.get("language"),
-            "charset": technical.get("charset"),
+            "has_ssl":      technical.get("has_ssl"),
+            "language":     technical.get("language"),
+            "charset":      technical.get("charset"),
             "viewport_meta": technical.get("viewport_meta"),
         },
         "design": {
-            "font_families": design.get("font_families", []),
+            "font_families":       design.get("font_families", []),
             "has_responsive_meta": design.get("has_responsive_meta"),
             "colors_detected_count": len(design.get("colors_used", [])),
-            "colors_sample": design.get("colors_used", [])[:20],
+            "colors_sample":       design.get("colors_used", [])[:20],
         },
         "cta": {
-            "buttons": cta.get("buttons", [])[:15],
+            "buttons":          cta.get("buttons", [])[:15],
             "cta_elements_count": len(cta.get("cta_elements", [])),
-            "cta_elements": cta.get("cta_elements", [])[:10],
+            "cta_elements":     cta.get("cta_elements", [])[:10],
         },
     }
 
@@ -383,36 +864,39 @@ def _build_audit_context(
         def fmt_score(v: float | None) -> str:
             return f"{round(v)}/100" if v is not None else "unavailable"
 
-        # Spell out each score explicitly so Claude cannot confuse them
         labelled_scores = (
-            f"Lighthouse Performance Score: {fmt_score(scores.get('performance_score'))}  "
-            f"← use this for the 'performance' category\n"
-            f"Lighthouse Accessibility Score: {fmt_score(scores.get('accessibility_score'))}  "
-            f"← use this for the 'accessibility' category\n"
-            f"Lighthouse SEO Score: {fmt_score(scores.get('seo_score'))}  "
-            f"← one signal in 'seo_health' (not the overall SEO score)\n"
-            f"Lighthouse Best Practices Score: {fmt_score(scores.get('best_practices_score'))}  "
-            f"← one signal in 'trust_credibility'"
+            f"Lighthouse Performance Score: {fmt_score(scores.get('performance_score'))}"
+            f"  ← use this for the 'performance' category\n"
+            f"Lighthouse Accessibility Score: {fmt_score(scores.get('accessibility_score'))}"
+            f"  ← use this for the 'accessibility' category\n"
+            f"Lighthouse SEO Score: {fmt_score(scores.get('seo_score'))}"
+            f"  ← one signal in 'seo_health' (not the overall SEO score)\n"
+            f"Lighthouse Best Practices Score: {fmt_score(scores.get('best_practices_score'))}"
+            f"  ← one signal in 'trust_credibility'"
         )
-
         lh_context: dict[str, Any] = {
             "core_web_vitals": cwv,
-            "page_stats": stats,
-            "diagnostics": diag,
+            "page_stats":      stats,
+            "diagnostics":     diag,
         }
-
         sections += [
             "",
             "## Lighthouse Data",
-            "### Scores (each is a distinct Lighthouse category — always name the category when citing a score)",
+            "### Scores (always name the specific category when citing any score)",
             labelled_scores,
             "### Core Web Vitals, Page Stats, Diagnostics",
             json.dumps(lh_context, indent=2, default=str),
         ]
     else:
-        sections += ["", "## Lighthouse Data", "Not available — evaluate performance from crawl data only."]
+        sections += [
+            "",
+            "## Lighthouse Data",
+            "Not available — evaluate performance from crawl data only.",
+        ]
 
-    sections.append("\n\nAnalyse the website using the data above and return your JSON audit report.")
+    sections.append(
+        "\n\nYou have tools available. Call them if needed, then produce the JSON audit report."
+    )
     return "\n".join(sections)
 
 
@@ -428,12 +912,12 @@ def _try_parse_json(raw: str) -> dict[str, Any] | None:
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()
-        text = "\n".join(line for line in lines if not line.startswith("```")).strip()
+        text = "\n".join(l for l in lines if not l.startswith("```")).strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         start = text.find("{")
-        end = text.rfind("}") + 1
+        end   = text.rfind("}") + 1
         if start == -1 or end == 0:
             return None
         try:
@@ -444,7 +928,7 @@ def _try_parse_json(raw: str) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# Fallback result (when all retries and parse attempts are exhausted)
+# Fallback result
 # ---------------------------------------------------------------------------
 
 
