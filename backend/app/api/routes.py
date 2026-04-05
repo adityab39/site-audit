@@ -388,10 +388,22 @@ async def _run_audit(job_id: uuid.UUID, url: str) -> None:
             crawl_data = await crawl_website(url)
 
             screenshot_bytes = _extract_screenshot(crawl_data)
+            # Strip screenshot bytes from what goes into the results JSON column
             crawl_for_results = {k: v for k, v in crawl_data.items() if k != "screenshot"}
 
-            if crawl_data.get("error"):
-                raise RuntimeError(f"Crawl failed: {crawl_data['error']}")
+            crawl_error   = crawl_data.get("error")
+            crawl_partial = crawl_data.get("partial", False)
+
+            if crawl_error and not crawl_partial:
+                # Page was completely unreachable — nothing to analyse
+                raise RuntimeError(f"Crawl failed: {crawl_error}")
+            elif crawl_error:
+                # Timeout or page-level error but the server responded;
+                # continue with whatever data was collected
+                logger.warning(
+                    "[%s] Crawl returned partial data (%s) — continuing to Lighthouse + Claude",
+                    job_id, crawl_error,
+                )
 
             # ── Stage 2: Lighthouse ───────────────────────────────────────────
             logger.info("[%s] Stage 2/3 – running Lighthouse", job_id)

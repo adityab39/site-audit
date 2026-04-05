@@ -25,8 +25,8 @@ settings = get_settings()
 # Constants
 # ---------------------------------------------------------------------------
 
-OVERALL_TIMEOUT_S: float = 60.0
-PAGE_LOAD_TIMEOUT_MS: int = 30_000  # Playwright uses milliseconds
+OVERALL_TIMEOUT_S: float = 180.0     # overall cap per crawl job
+PAGE_LOAD_TIMEOUT_MS: int = 60_000  # page.goto timeout (Playwright uses ms)
 JS_SETTLE_MS: int = 3_000           # wait after DOMContentLoaded for JS to render
 
 _CTA_KEYWORDS: frozenset[str] = frozenset(
@@ -60,7 +60,7 @@ class CrawlError(Exception):
 async def crawl_website(url: str) -> dict[str, Any]:
     """Crawl *url* with a headless Chromium browser and return structured data.
 
-    The returned dictionary contains five top-level sections:
+    The returned dictionary contains:
 
     * ``metadata``  – title, description, OG tags, canonical, favicon …
     * ``content``   – headings, paragraphs, links, images, word count …
@@ -69,23 +69,49 @@ async def crawl_website(url: str) -> dict[str, Any]:
     * ``cta``       – buttons and detected call-to-action elements
     * ``screenshot``– base-64-encoded PNG of the full page (or ``None``)
     * ``error``     – set only when a recoverable error occurred
+    * ``partial``   – True when the page loaded but extraction was incomplete
 
     An unrecoverable launch failure re-raises; page-level errors are
-    captured in the ``error`` key so the caller can store them gracefully.
+    captured in the ``error`` key so the caller can handle them gracefully.
     """
     async with async_playwright() as pw:
         browser: Browser = await pw.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"],
         )
+        # Shared mutable state written by _extract as it progresses.
+        # If asyncio cancels _extract on timeout, whatever was already written
+        # here is still readable in the except block below.
+        state: dict[str, Any] = {}
+
         try:
             return await asyncio.wait_for(
-                _extract(browser, url),
+                _extract(browser, url, state),
                 timeout=OVERALL_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
-            logger.warning("Overall 60-second timeout hit for %s", url)
-            return _error_result(url, "Crawl timed out after 60 seconds")
+            if state.get("url"):
+                # Page at least responded — return whatever was extracted
+                logger.warning(
+                    "Overall %ds timeout for %s — returning partial data (sections: %s)",
+                    int(OVERALL_TIMEOUT_S),
+                    url,
+                    [k for k in ("metadata", "content", "technical", "design", "cta") if state.get(k)],
+                )
+                return {
+                    "url": url,
+                    "status_code": state.get("status_code"),
+                    "metadata":  state.get("metadata",  {}),
+                    "content":   state.get("content",   {}),
+                    "technical": state.get("technical", {"has_ssl": url.startswith("https://")}),
+                    "design":    state.get("design",    {}),
+                    "cta":       state.get("cta",       {}),
+                    "screenshot": state.get("screenshot"),
+                    "partial": True,
+                    "error": f"Crawl timed out after {int(OVERALL_TIMEOUT_S)}s — partial data returned",
+                }
+            logger.warning("Overall %ds timeout for %s — page never responded", int(OVERALL_TIMEOUT_S), url)
+            return _error_result(url, f"Crawl timed out after {int(OVERALL_TIMEOUT_S)}s")
         except CrawlError as exc:
             logger.warning("Crawl error for %s: %s", url, exc)
             return _error_result(url, str(exc))
@@ -101,8 +127,13 @@ async def crawl_website(url: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _extract(browser: Browser, url: str) -> dict[str, Any]:
-    """Open one page, navigate, extract all data sections, close page."""
+async def _extract(browser: Browser, url: str, state: dict[str, Any]) -> dict[str, Any]:
+    """Open one page, navigate, extract all data sections, close page.
+
+    ``state`` is a shared mutable dict owned by the caller (``crawl_website``).
+    We write into it progressively so the caller can read partial results even
+    if this coroutine is cancelled by ``asyncio.wait_for`` on overall timeout.
+    """
     page: Page = await browser.new_page(
         viewport={"width": 1280, "height": 800},
         user_agent=(
@@ -110,13 +141,11 @@ async def _extract(browser: Browser, url: str) -> dict[str, Any]:
             "+https://github.com/site-audit-ai)"
         ),
     )
-    # Partial data collected before any timeout — returned instead of failing.
-    partial: dict[str, Any] = {}
     response: Response | None = None
 
     try:
-        # Use domcontentloaded instead of networkidle — networkidle hangs
-        # on sites with persistent connections, analytics, or websockets.
+        # Use domcontentloaded — networkidle hangs on sites with persistent
+        # connections, analytics, chat widgets, or long-polling websockets.
         response = await page.goto(
             url,
             timeout=PAGE_LOAD_TIMEOUT_MS,
@@ -127,10 +156,16 @@ async def _extract(browser: Browser, url: str) -> dict[str, Any]:
         if response.status >= 400:
             raise CrawlError(f"HTTP {response.status} received for {url}")
 
+        # Seed state so the caller knows the page responded even if we time out
+        # during the extraction phase that follows.
+        state["url"] = url
+        state["status_code"] = response.status
+        state["technical"] = {"has_ssl": url.startswith("https://")}  # minimum
+
         # Give JavaScript time to render after the DOM is ready.
         await page.wait_for_timeout(JS_SETTLE_MS)
 
-        # Run all extraction tasks concurrently where possible.
+        # Run all extraction tasks concurrently.
         try:
             (
                 metadata,
@@ -145,29 +180,32 @@ async def _extract(browser: Browser, url: str) -> dict[str, Any]:
                 _extract_design(page),
                 _extract_cta(page),
             )
-            partial = {
+            # Write into shared state — visible to caller after any cancellation
+            state.update({
                 "metadata": metadata,
-                "content": content,
+                "content":  content,
                 "technical": technical,
-                "design": design,
-                "cta": cta,
-            }
+                "design":   design,
+                "cta":      cta,
+            })
         except Exception as extract_exc:
-            # Extraction partially failed — log and continue with whatever
-            # was collected; screenshot is still attempted below.
+            # gather can fail if one extractor errors; keep whatever landed in
+            # state from earlier individual writes (none here, but future-safe).
             logger.warning("Partial extraction error for %s: %s", url, extract_exc)
 
         screenshot_b64 = await _take_screenshot(page)
+        state["screenshot"] = screenshot_b64
 
         return {
             "url": url,
-            "status_code": response.status if response else None,
-            "metadata": partial.get("metadata", {}),
-            "content": partial.get("content", {}),
-            "technical": partial.get("technical", {"has_ssl": url.startswith("https://")}),
-            "design": partial.get("design", {}),
-            "cta": partial.get("cta", {}),
+            "status_code": response.status,
+            "metadata":  state.get("metadata",  {}),
+            "content":   state.get("content",   {}),
+            "technical": state.get("technical", {"has_ssl": url.startswith("https://")}),
+            "design":    state.get("design",    {}),
+            "cta":       state.get("cta",       {}),
             "screenshot": screenshot_b64,
+            "partial": False,
             "error": None,
         }
 
@@ -175,19 +213,22 @@ async def _extract(browser: Browser, url: str) -> dict[str, Any]:
         raise  # re-raise so crawl_website() handles it as a named error
 
     except Exception as exc:
-        # Any other page-level error (including playwright TimeoutError from
-        # goto): log it and return whatever partial data was collected.
+        # Playwright TimeoutError from page.goto, JS errors, network errors …
+        # Return whatever was extracted before the failure.
         logger.warning("Page error for %s (%s) — returning partial data", url, exc)
         screenshot_b64 = await _take_screenshot(page)
+        state["screenshot"] = screenshot_b64
+        is_partial = response is not None  # True = page responded, extraction failed
         return {
             "url": url,
             "status_code": response.status if response else None,
-            "metadata": partial.get("metadata", {}),
-            "content": partial.get("content", {}),
-            "technical": partial.get("technical", {"has_ssl": url.startswith("https://")}),
-            "design": partial.get("design", {}),
-            "cta": partial.get("cta", {}),
+            "metadata":  state.get("metadata",  {}),
+            "content":   state.get("content",   {}),
+            "technical": state.get("technical", {"has_ssl": url.startswith("https://")}),
+            "design":    state.get("design",    {}),
+            "cta":       state.get("cta",       {}),
             "screenshot": screenshot_b64,
+            "partial": is_partial,
             "error": str(exc),
         }
 
@@ -591,6 +632,7 @@ def _origin(url: str) -> str:
 
 
 def _error_result(url: str, message: str) -> dict[str, Any]:
+    """Return a fully-failed result — page was completely unreachable."""
     return {
         "url": url,
         "status_code": None,
@@ -600,6 +642,7 @@ def _error_result(url: str, message: str) -> dict[str, Any]:
         "design": {},
         "cta": {},
         "screenshot": None,
+        "partial": False,
         "error": message,
     }
 
