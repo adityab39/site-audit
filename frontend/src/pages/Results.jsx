@@ -79,27 +79,47 @@ function LighthouseMetrics({ lighthouse }) {
     { label: 'Page Size', raw: null,                         value: size(pageStats.total_page_size_bytes) },
   ]
 
-  const perfScore = scores.performance_score
-  const perfColor = perfScore == null ? 'text-zinc-500'
-    : perfScore >= 75 ? 'text-green-400'
-    : perfScore >= 50 ? 'text-yellow-400'
-    : 'text-red-400'
+  const lhScoreBadge = (label, value) => {
+    if (value == null) return null
+    const n = Math.round(value)
+    const color = n >= 90 ? 'text-green-400 border-green-400/30 bg-green-400/5'
+      : n >= 50 ? 'text-yellow-400 border-yellow-400/30 bg-yellow-400/5'
+      : 'text-red-400 border-red-400/30 bg-red-400/5'
+    return (
+      <div key={label} className={`flex flex-col items-center justify-center border rounded-xl px-4 py-2.5 ${color}`}>
+        <span className="text-lg font-bold leading-none">{n}<span className="text-xs font-normal opacity-60">/100</span></span>
+        <span className="text-[11px] uppercase tracking-wider mt-1 opacity-70">{label}</span>
+      </div>
+    )
+  }
+
+  const lhScores = [
+    lhScoreBadge('Performance',     scores.performance_score),
+    lhScoreBadge('Accessibility',   scores.accessibility_score),
+    lhScoreBadge('SEO',             scores.seo_score),
+    lhScoreBadge('Best Practices',  scores.best_practices_score),
+  ].filter(Boolean)
 
   return (
-    <div className="space-y-3">
-      {perfScore != null && (
-        <p className="text-xs text-zinc-600">
-          Lighthouse Performance Score:{' '}
-          <span className={`font-bold ${perfColor}`}>{Math.round(perfScore)}/100</span>
-        </p>
-      )}
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
-        {metrics.map((m) => (
-          <div key={m.label} className="glass-card border border-zinc-800 p-3 text-center rounded-xl">
-            <p className="text-[11px] text-zinc-500 mb-1 uppercase tracking-wider">{m.label}</p>
-            <p className={`text-sm font-bold ${cwvColor(m.label, m.raw)}`}>{m.value}</p>
+    <div className="space-y-4">
+      {lhScores.length > 0 && (
+        <div>
+          <p className="text-[11px] text-zinc-500 uppercase tracking-wider mb-2">Lighthouse Scores</p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {lhScores}
           </div>
-        ))}
+        </div>
+      )}
+      <div>
+        <p className="text-[11px] text-zinc-500 uppercase tracking-wider mb-2">Core Web Vitals</p>
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+          {metrics.map((m) => (
+            <div key={m.label} className="glass-card border border-zinc-800 p-3 text-center rounded-xl">
+              <p className="text-[11px] text-zinc-500 mb-1 uppercase tracking-wider">{m.label}</p>
+              <p className={`text-sm font-bold ${cwvColor(m.label, m.raw)}`}>{m.value}</p>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   )
@@ -353,7 +373,7 @@ export default function Results() {
         {/* ── Core Web Vitals ───────────────────────────────────────────── */}
         {lighthouse && lighthouse.core_web_vitals && (
           <section className="animate-slide-up">
-            <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">Core Web Vitals</h2>
+            <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">Lighthouse Scores</h2>
             <LighthouseMetrics lighthouse={lighthouse} />
           </section>
         )}
