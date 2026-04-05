@@ -127,6 +127,10 @@ Score each category from 0 to 10 (integers preferred).
      • Lighthouse SEO Score (0-100) — one signal in "seo_health"
      • Lighthouse Best Practices Score (0-100) — one signal in "trust_credibility"
    NEVER write "Lighthouse score" without specifying which category.
+   NEVER quote specific Lighthouse score numbers (e.g. "55/100") inside individual
+   finding descriptions — those scores are already displayed in the UI next to each
+   category. Describe what the metric means for real users instead (e.g. "pages take
+   over 4 seconds to become interactive on desktop connections").
 
 4. design_ux — Visual design and user experience
    • CTA visibility and placement above the fold
@@ -158,9 +162,14 @@ Score each category from 0 to 10 (integers preferred).
 Each finding must include:
   severity       "critical" | "warning" | "info"
   title          ≤8 words
-  description    Specific, data-grounded observation (cite actual titles, scores,
-                 counts from the data — never generic boilerplate)
+  description    Specific, data-grounded observation (cite actual page titles,
+                 word counts, link counts, image counts, SSL issuer, etc. — never
+                 generic boilerplate). Do NOT repeat Lighthouse score numbers here;
+                 those are already shown in the UI.
   recommendation Concrete, actionable next step
+
+If any tool returns check_failed or status "check_failed", do NOT invent a finding
+for that check. Either skip it or note "could not be verified automatically".
 
 ━━━ PRIORITY FIXES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 List the top 5 highest-impact improvements across all categories, ranked by
@@ -308,38 +317,64 @@ def _http_fetch_sync(
     timeout: float = _TOOL_HTTP_TIMEOUT,
     max_bytes: int = 50_000,
 ) -> tuple[int, str, dict[str, str]]:
-    """Blocking HTTP fetch. Returns (status_code, body, headers)."""
+    """Blocking HTTP fetch. Returns (status_code, body, headers).
+
+    Status 0 means a connection/timeout failure (NOT a 404).
+    Callers must treat status 0 as "check failed" rather than "not found".
+    """
     try:
         req = urllib.request.Request(
             url,
             method=method,
-            headers={"User-Agent": "SiteAuditBot/1.0"},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; SiteAuditBot/1.0)"},
         )
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+        # Do NOT pass a custom ssl context — let Python use its system default.
+        # Passing ssl.create_default_context() here breaks HTTPS for many sites.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read(max_bytes).decode(errors="replace") if method == "GET" else ""
             return resp.status, body, dict(resp.headers)
     except urllib.error.HTTPError as exc:
         return exc.code, "", {}
     except Exception:
+        # Connection refused, DNS failure, timeout, SSL error, etc.
         return 0, "", {}
 
 
 async def _tool_fetch_robots_txt(url: str) -> dict[str, Any]:
     origin = _make_origin(url)
     robots_url = f"{origin}/robots.txt"
-    status, body, _ = await asyncio.to_thread(_http_fetch_sync, robots_url)
-    if status == 200 and body:
-        lines = [l for l in body.strip().splitlines() if l.strip()]
-        disallow_count = sum(1 for l in lines if l.lower().startswith("disallow"))
+    try:
+        status, body, _ = await asyncio.wait_for(
+            asyncio.to_thread(_http_fetch_sync, robots_url),
+            timeout=10.0,
+        )
+    except (asyncio.TimeoutError, Exception) as exc:
         return {
             "url": robots_url,
-            "found": True,
+            "status": "check_failed",
+            "error": "Connection timed out or failed — could not verify robots.txt",
+        }
+
+    if status == 200 and body:
+        lines = [ln for ln in body.strip().splitlines() if ln.strip()]
+        disallow_count = sum(1 for ln in lines if ln.lower().startswith("disallow"))
+        return {
+            "url": robots_url,
+            "status": "found",
             "total_lines": len(lines),
             "disallow_rules": disallow_count,
             "preview": "\n".join(lines[:30]),
         }
-    return {"url": robots_url, "found": False, "status_code": status}
+    if status == 404:
+        return {"url": robots_url, "status": "not_found"}
+    if status == 0:
+        # Connection failure, timeout, or SSL error — do NOT report as missing
+        return {
+            "url": robots_url,
+            "status": "check_failed",
+            "error": "Could not connect to server — robots.txt status unknown",
+        }
+    return {"url": robots_url, "status": "not_found", "http_status": status}
 
 
 async def _tool_check_image_sizes(image_urls: list[str]) -> dict[str, Any]:
@@ -381,18 +416,26 @@ def _ssl_details_sync(hostname: str, port: int = 443) -> dict[str, Any]:
         with socket.create_connection((hostname, port), timeout=8) as sock:
             with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
                 cert = ssock.getpeercert()
-                not_after = cert.get("notAfter", "")
-                issuer_fields = dict(x[0] for x in cert.get("issuer", []))
+                not_after: str = cert.get("notAfter", "")
+                issuer_fields  = dict(x[0] for x in cert.get("issuer", []))
                 subject_fields = dict(x[0] for x in cert.get("subject", []))
-                expiry_dt: datetime | None = None
+
                 days_left: int | None = None
                 if not_after:
-                    expiry_dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z").replace(
-                        tzinfo=timezone.utc
-                    )
-                    days_left = (expiry_dt - datetime.now(timezone.utc)).days
+                    try:
+                        # notAfter format: "Mar  1 00:00:00 2026 GMT" or "Mar 10 …"
+                        # Remove " GMT" suffix before parsing to avoid %Z platform issues;
+                        # collapse any double-space (single-digit day padding).
+                        clean = not_after.replace(" GMT", "").replace("  ", " ").strip()
+                        expiry_dt = datetime.strptime(clean, "%b %d %H:%M:%S %Y").replace(
+                            tzinfo=timezone.utc
+                        )
+                        days_left = (expiry_dt - datetime.now(timezone.utc)).days
+                    except ValueError:
+                        pass  # leave days_left as None if parsing fails
+
                 return {
-                    "valid": True,
+                    "status": "verified",
                     "issuer": issuer_fields.get("organizationName", "Unknown"),
                     "common_name": subject_fields.get("commonName", hostname),
                     "expires": not_after,
@@ -400,35 +443,56 @@ def _ssl_details_sync(hostname: str, port: int = 443) -> dict[str, Any]:
                     "expiry_warning": days_left is not None and days_left < 30,
                 }
     except ssl.SSLCertVerificationError as exc:
-        return {"valid": False, "error": f"Certificate verification failed: {exc}"}
+        return {"status": "invalid", "error": f"Certificate verification failed: {exc}"}
     except Exception as exc:
-        return {"valid": False, "error": str(exc)}
+        return {
+            "status": "check_failed",
+            "error": f"Could not connect or read certificate: {exc}",
+        }
 
 
 async def _tool_check_ssl_details(url: str) -> dict[str, Any]:
     if not url.startswith("https://"):
-        return {"valid": False, "error": "URL does not use HTTPS"}
+        return {"status": "not_applicable", "error": "URL does not use HTTPS"}
     parsed = urllib.parse.urlparse(url)
     hostname = parsed.hostname or ""
     port = parsed.port or 443
     if not hostname:
-        return {"valid": False, "error": "Could not parse hostname from URL"}
-    return await asyncio.to_thread(_ssl_details_sync, hostname, port)
+        return {"status": "check_failed", "error": "Could not parse hostname from URL"}
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_ssl_details_sync, hostname, port),
+            timeout=12.0,
+        )
+        return result
+    except asyncio.TimeoutError:
+        return {"status": "check_failed", "error": "SSL check timed out"}
 
 
 async def _tool_check_broken_links(links: list[str]) -> dict[str, Any]:
-    urls = [u for u in links if u and u.startswith("http")][:15]
+    # Cap at 20, filter to absolute URLs only, use HEAD with a 5-second timeout
+    urls = [u for u in links if u and u.startswith("http")][:20]
     if not urls:
-        return {"error": "No valid absolute URLs provided"}
+        return {"check_failed": True, "error": "No valid absolute URLs provided"}
+
+    _PER_LINK_TIMEOUT = 5.0
 
     async def _one(link: str) -> dict[str, Any]:
-        status, _, _ = await asyncio.to_thread(_http_fetch_sync, link, "HEAD")
-        broken = status == 0 or 400 <= status < 600
+        try:
+            status, _, _ = await asyncio.wait_for(
+                asyncio.to_thread(_http_fetch_sync, link, "HEAD", _PER_LINK_TIMEOUT),
+                timeout=_PER_LINK_TIMEOUT + 1,
+            )
+        except asyncio.TimeoutError:
+            return {"url": link[:120], "status": 0, "broken": False, "skipped": "timeout"}
+        except Exception:
+            return {"url": link[:120], "status": 0, "broken": False, "skipped": "error"}
+        broken = 400 <= status < 600
         return {"url": link[:120], "status": status, "broken": broken}
 
     results: list[Any] = await asyncio.gather(*[_one(u) for u in urls], return_exceptions=True)
     clean = [
-        r if isinstance(r, dict) else {"url": urls[i], "status": 0, "broken": True}
+        r if isinstance(r, dict) else {"url": urls[i], "status": 0, "broken": False, "skipped": "exception"}
         for i, r in enumerate(results)
     ]
     broken = [r for r in clean if r.get("broken")]
@@ -436,7 +500,8 @@ async def _tool_check_broken_links(links: list[str]) -> dict[str, Any]:
         "checked": len(clean),
         "broken_count": len(broken),
         "broken_links": broken,
-        "healthy_count": len(clean) - len(broken),
+        "healthy_count": len([r for r in clean if not r.get("broken") and not r.get("skipped")]),
+        "skipped_count": len([r for r in clean if r.get("skipped")]),
     }
 
 
@@ -491,7 +556,11 @@ async def _tool_fetch_sitemap(url: str) -> dict[str, Any]:
 
 
 async def _execute_tool(name: str, tool_input: dict[str, Any], crawl_url: str) -> dict[str, Any]:
-    """Route a tool call from Claude to the correct async implementation."""
+    """Route a tool call from Claude to the correct async implementation.
+
+    Any exception is caught and returned as a structured ``check_failed`` dict
+    so Claude knows the check didn't succeed and must NOT invent findings.
+    """
     try:
         if name == "fetch_robots_txt":
             return await _tool_fetch_robots_txt(tool_input.get("url", crawl_url))
@@ -503,10 +572,13 @@ async def _execute_tool(name: str, tool_input: dict[str, Any], crawl_url: str) -
             return await _tool_check_broken_links(tool_input.get("links", []))
         if name == "fetch_sitemap":
             return await _tool_fetch_sitemap(tool_input.get("url", crawl_url))
-        return {"error": f"Unknown tool: {name}"}
+        return {"check_failed": True, "error": f"Unknown tool: {name}"}
     except Exception as exc:
         logger.warning("[Agent] Tool '%s' raised an exception: %s", name, exc)
-        return {"error": str(exc)}
+        return {
+            "check_failed": True,
+            "error": f"Tool execution failed: {exc}. Do not invent findings based on this.",
+        }
 
 
 # ---------------------------------------------------------------------------
